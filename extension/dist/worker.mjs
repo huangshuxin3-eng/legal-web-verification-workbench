@@ -25,9 +25,15 @@ const supported = (url) => {
   const parsed = new URL(url);
   return (
     ["http:", "https:"].includes(parsed.protocol) &&
-    parsed.hostname !== "chromewebstore.google.com"
+    parsed.hostname !== "chromewebstore.google.com" &&
+    !(
+      parsed.hostname === "chrome.google.com" &&
+      parsed.pathname.startsWith("/webstore")
+    )
   );
 };
+const unsupportedMessage =
+  "当前页面无法自动生成 PDF 留痕。你可以使用 Ctrl+P 保存 PDF 后，在工作台通过“添加留痕”手动上传。";
 async function uploadPdf(queryId, sourceUrl, requestId, blob) {
   const form = new FormData();
   form.set("query_id", queryId);
@@ -72,9 +78,7 @@ async function archive(queryId) {
       currentWindow: true,
     });
     if (!tab?.id || !tab.url || !supported(tab.url))
-      throw new Error(
-        "当前页面无法自动生成 PDF 留痕。你可以使用 Ctrl+P 保存 PDF 后，在工作台通过“添加留痕”手动上传。",
-      );
+      throw new Error(unsupportedMessage);
     const frozen = { tabId: tab.id, sourceUrl: tab.url };
     await saveJob({
       status: "running",
@@ -92,6 +96,8 @@ async function archive(queryId) {
         await saveJob({ stage });
       },
     );
+    stage = "validate";
+    await saveJob({ stage });
     const current = await chrome.tabs.get(frozen.tabId).catch(() => null);
     if (!current || current.url !== frozen.sourceUrl)
       throw new Error(
@@ -108,6 +114,7 @@ async function archive(queryId) {
     await saveJob({
       stage,
       printMs: printed.printMs,
+      debuggerMs: printed.debuggerMs,
       printedAt: printed.printedAt,
       bytes: bytes.length,
     });
@@ -132,15 +139,26 @@ async function archive(queryId) {
     });
     return { capture, filename };
   } catch (error) {
+    const technicalError = String(error.message || error);
+    let displayError = technicalError;
+    if (
+      ["attach", "print"].includes(stage) &&
+      !/用户已取消/.test(technicalError)
+    )
+      displayError = unsupportedMessage;
+    if (stage === "detach")
+      displayError =
+        "PDF 生成过程已结束，但无法确认 Chrome 已解除调试。请检查 Chrome 的调试提示条，关闭提示后再重试。";
     await saveJob({
       status: "failed",
       stage,
       queryId,
       requestId,
-      error: String(error.message || error),
+      error: displayError,
+      technicalError,
       recovery: error.recovery || null,
     });
-    throw error;
+    throw new Error(displayError);
   } finally {
     running = null;
   }

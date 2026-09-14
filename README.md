@@ -36,7 +36,7 @@
 
 所有 id 默认 gen_random_uuid()。Project → Task → Query → Capture 外键均为 ON DELETE CASCADE。删除 Auth 用户也会删除其项目树。projects.owner_id、tasks.project_id 有索引；两组序号唯一约束的索引同时覆盖各自父级外键查询。
 
-`set_task_completed_at` 为非 SECURITY DEFINER 触发器函数：首次进入 completed 时写数据库当前时间；completed 状态下编辑保留原时间（阻止直接篡改）；退出 completed 清空；再次完成写新的时间。CHECK 约束保证状态和完成时间一致。未绑定截图完成条件，符合本阶段范围。
+`set_task_completed_at` 为非 SECURITY DEFINER 触发器函数：首次进入 completed 时写数据库当前时间；completed 状态下编辑保留原时间（阻止直接篡改）；退出 completed 清空；再次完成写新的时间。CHECK 约束保证状态和完成时间一致。未绑定留痕完成条件，符合本阶段范围。
 
 ## 3. RLS 策略
 

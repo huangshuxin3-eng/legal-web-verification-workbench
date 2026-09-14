@@ -1,6 +1,6 @@
 import sharp from "sharp";
-import type { CaptureExtension } from "../capture-names";
-import { CaptureOperationError } from "../capture-workflow";
+import type { CaptureExtension } from "../capture-names.ts";
+import { CaptureOperationError } from "../capture-workflow.ts";
 
 export async function validateCaptureFile(
   bytes: Buffer,

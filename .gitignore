@@ -4,3 +4,6 @@ node_modules/
 .env*
 !.env.example
 *.tsbuildinfo
+supabase/.temp/
+extension/.dist-staging/
+extension/.dist-previous/

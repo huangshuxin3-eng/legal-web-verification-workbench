@@ -2,6 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { businessName } from "../src/lib/names.mjs";
+import {
+  cleanupSourceRoot,
+  loadSourceModule,
+  probePrintConfigPath,
+} from "./helpers/source-modules.mjs";
+
+test.after(cleanupSourceRoot);
 
 test("manifest requests only the four Milestone 4 permissions", async () => {
   const manifest = JSON.parse(
@@ -34,13 +41,7 @@ test("Chinese PDF business filename is deterministic and Windows safe", () => {
 });
 
 test("PDF profile is imported from probe as the build source of truth", async () => {
-  const probe = await readFile(
-    new URL(
-      "../../../chrome-pdf-probe/extension/print-config.mjs",
-      import.meta.url,
-    ),
-    "utf8",
-  );
+  const probe = await readFile(probePrintConfigPath, "utf8");
   assert.match(probe, /paperWidth:\s*210 \/ 25\.4/);
   assert.match(probe, /printBackground:\s*true/);
   assert.match(probe, /displayHeaderFooter:\s*true/);
@@ -64,7 +65,8 @@ test("print lifecycle detaches after success and print failure", async () => {
       },
     },
   };
-  const { printTab } = await import("../dist/lib/print.mjs");
+  // 直接加载 extension/src 的真实逻辑，而不是 dist 产物。
+  const { printTab } = await loadSourceModule("lib/print.mjs");
   await printTab(3);
   assert.deepEqual(calls, ["attach", "print", "detach"]);
   calls.length = 0;

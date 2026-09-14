@@ -40,8 +40,9 @@ export async function printTab(tabId, signal, progress = async () => {}) {
               5000,
               "迟到的 debugger detach",
             );
-          } catch {
-            /* surfaced by Chrome's persistent banner */
+          } catch (error) {
+            console.error("Late debugger detach failed", error);
+            await progress("detach-failed");
           }
         }
       },
@@ -61,6 +62,7 @@ export async function printTab(tabId, signal, progress = async () => {}) {
       throw error;
     }
     const printedAt = new Date();
+    const printStarted = performance.now();
     await progress("print");
     const result = await deadline(
       Promise.race([
@@ -78,7 +80,8 @@ export async function printTab(tabId, signal, progress = async () => {}) {
     return {
       data: result.data,
       printedAt: printedAt.toISOString(),
-      printMs: Math.round(performance.now() - started),
+      printMs: Math.round(performance.now() - printStarted),
+      debuggerMs: Math.round(performance.now() - started),
     };
   } finally {
     if (attached && !abandonedAttach && !detachedByChrome) {

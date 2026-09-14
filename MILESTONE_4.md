@@ -128,9 +128,11 @@ C:\Users\黄舒心\Documents\产品经理计划\nonlit-workbench\extension\dist
 
 ## 自动化验证与已知限制
 
-- `npm run test:db`：48 项通过，包含真实 PostgreSQL RLS 角色模拟、PDF、nullable URL、20 MiB Bucket、稳定 request_id、编号不复用、A/B Storage 隔离和 M1/M2 回归。
-- `npm run extension:test`：4 项通过，包含最小权限、中文名、probe 配置来源、成功/失败 detach。
+- `npm run test:db`：49 / 49 通过，包含真实 PostgreSQL RLS 角色模拟、PDF/PNG/JPG 字节识别、nullable URL、20 MiB Bucket、稳定 request_id、编号不复用、A/B Storage 隔离和 M1/M2 回归。
+- `npm run extension:test`：10 / 10 通过。核心逻辑测试直接加载 `extension/src`（attach / print / detach 生命周期、中文业务文件名、最小权限），另有独立产物测试覆盖构建结果：`extension/dist` 与 `extension/src` 逐文件同步、`dist/print-config.mjs` 与 probe 完全一致、`dist/manifest.json` 仅四项权限且 host permissions 恰为两个精确 Origin、`dist/config.mjs` 仅含公开客户端凭据。
 - `npm run typecheck`：通过。
 - `npm run build`：通过。
 
-尚未在本轮对真实 Supabase 执行 M4 migration，也未声称真实 Chrome + Supabase 端到端通过。Chrome 内部页、Web Store、DevTools 冲突等受浏览器限制；扩展会给出兜底提示。动态页面只打印调用时已渲染的内容。PDF 超过 20 MB 不上传。若 service worker 或整个 Chrome 进程被强制终止，JavaScript `finally` 无法继续；Chrome 会结束调试会话，但仍需在真实环境观察提示状态。扩展与 Web 是独立登录会话。
+交接基线（commit `b23e526`）的实测是 `npm run test:db` 共 49 项、48 通过、1 失败：`src/lib/server/capture-file.ts` 中新增的 `CaptureOperationError` 导入缺少 `.ts` 扩展名，`tests/capture-files.test.ts` 因此无法被 Node `--experimental-strip-types` 加载，M4 新增的文件类型校验当时实际未执行。该导入已按项目既有约定（`allowImportingTsExtensions` + 直载模块带 `.ts`）补全，现为 49 / 49。同一基线提交的 `extension/dist` 也早于 `extension/src`（`worker.mjs` 162 行 vs 180 行、`lib/print.mjs` 91 行 vs 94 行），已重新构建同步。
+
+尚未对真实 Supabase 执行 M4 migration，也未声称真实 Chrome + Supabase 端到端通过。Chrome 内部页、Web Store、DevTools 冲突等受浏览器限制；扩展会给出兜底提示。动态页面只打印调用时已渲染的内容。PDF 超过 20 MB 不上传。若 service worker 或整个 Chrome 进程被强制终止，JavaScript `finally` 无法继续；Chrome 会结束调试会话，但仍需在真实环境观察提示状态。扩展与 Web 是独立登录会话。
