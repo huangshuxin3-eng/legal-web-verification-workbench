@@ -31,10 +31,13 @@ supabase/migrations/202609140004_milestone_4.sql
 
 ## Manifest permissions
 
-- `activeTab`：用户点击扩展打开 Side Panel 后，读取该窗口当前活动 Tab 的 ID 与 URL；不申请 `<all_urls>`。
+- `activeTab`：用户点击扩展打开 Side Panel 时的临时授权，配合 `tabs` 使用。
 - `debugger`：对冻结的 Tab 调用 CDP `Page.printToPDF` 并 detach。
 - `sidePanel`：正式操作入口。
 - `storage`：保存扩展自己的 Supabase Session、最近 Query 选择和一次归档任务状态。
+- `tabs`：读取当前活动 Tab 的 URL。`Tab.url` 只在扩展持有该 Tab 的 host 权限（`tabs` 权限或 `activeTab` 临时授权）时返回；Side Panel 是长期驻留面板，切换标签页后 `activeTab` 不会自动授予新 Tab，实测"当前网页 URL"显示"当前页面 URL 不可读取"，主按钮被禁用。该权限是真实 Chrome E2E 确认现象后新增，仅暴露标签页元数据（URL / 标题），**不授予页面内容访问**。
+
+选择 `tabs` 而不是 `<all_urls>`：Side Panel 需要的是"当前是哪个页面"，不是页面内容。`<all_urls>` 会授予所有站点的内容访问与注入能力，远超需要；`tabs` 只提供标签页元数据，权限面显著更小。
 
 构建后只添加两个精确 host permissions：Supabase Project Origin，以及 `NEXT_PUBLIC_WORKBENCH_URL` 的 Origin。Publishable Key 会写入构建产物；它是公开客户端凭据。扩展中没有 service role、secret key 或数据库密码。
 
@@ -117,7 +120,7 @@ C:\Users\黄舒心\Documents\产品经理计划\nonlit-workbench\extension\dist
 
 1. 先执行 M4 migration，检查 captures Bucket 仍为 Private、20 MiB、三种 MIME，captures 仍仅六字段。
 2. 启动 Web，确认工作台显示“留痕数量”；Query 中“添加留痕”接受 PDF/PNG/JPG、URL 留空可上传，Private 预览/下载/删除正常，下载是中文名。
-3. 加载 `extension/dist`，确认权限只有四项及两个精确 Origin；打开 Side Panel，用账号 A 登录。
+3. 加载 `extension/dist`，确认权限为五项（`activeTab` / `debugger` / `sidePanel` / `storage` / `tabs`）及两个精确 Origin；打开 Side Panel，用账号 A 登录。切换到其他标签页后，"当前网页 URL"应自动刷新为新标签页地址，主按钮恢复可用。
 4. 依次选择 A 的 Project、Task、Query；核对 Task 核查网站、当前 URL、留痕数量。关闭重开后应恢复仍有权访问的 Query。
 5. 普通公开网页点击“留痕并归档”；按钮锁定，Chrome 短暂显示 debugger 提示，完成后消失。核对 PDF 时间、标题、URL、页码、背景、末尾，Storage ASCII 路径、Capture source_url 与冻结 URL、中文名及计数。
 6. 对长页和动态查询页重复；核对条件、所有表格行、多页、末尾和耗时。打印期间切换窗口或操作其他页面，目标仍应是冻结 tabId；若目标 Tab 自身跳转，本次不归档。
@@ -129,7 +132,7 @@ C:\Users\黄舒心\Documents\产品经理计划\nonlit-workbench\extension\dist
 ## 自动化验证与已知限制
 
 - `npm run test:db`：49 / 49 通过，包含真实 PostgreSQL RLS 角色模拟、PDF/PNG/JPG 字节识别、nullable URL、20 MiB Bucket、稳定 request_id、编号不复用、A/B Storage 隔离和 M1/M2 回归。
-- `npm run extension:test`：10 / 10 通过。核心逻辑测试直接加载 `extension/src`（attach / print / detach 生命周期、中文业务文件名、最小权限），另有独立产物测试覆盖构建结果：`extension/dist` 与 `extension/src` 逐文件同步、`dist/print-config.mjs` 与 probe 完全一致、`dist/manifest.json` 仅四项权限且 host permissions 恰为两个精确 Origin、`dist/config.mjs` 仅含公开客户端凭据。
+- `npm run extension:test`：10 / 10 通过。核心逻辑测试直接加载 `extension/src`（attach / print / detach 生命周期、中文业务文件名、最小权限），另有独立产物测试覆盖构建结果：`extension/dist` 与 `extension/src` 逐文件同步、`dist/print-config.mjs` 与 probe 完全一致、`dist/manifest.json` 恰为五项权限且 host permissions 恰为两个精确 Origin、`dist/config.mjs` 仅含公开客户端凭据。
 - `npm run typecheck`：通过。
 - `npm run build`：通过。
 

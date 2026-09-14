@@ -10,7 +10,7 @@ import {
 
 test.after(cleanupSourceRoot);
 
-test("manifest requests only the four Milestone 4 permissions", async () => {
+test("manifest requests only the five Milestone 4 permissions", async () => {
   const manifest = JSON.parse(
     await readFile(new URL("../manifest.template.json", import.meta.url)),
   );
@@ -19,6 +19,7 @@ test("manifest requests only the four Milestone 4 permissions", async () => {
     "debugger",
     "sidePanel",
     "storage",
+    "tabs",
   ]);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.side_panel.default_path, "sidepanel.html");

@@ -54,7 +54,7 @@ test("dist republishes the probe PDF profile without a second copy", async () =>
   assert.equal(published, probe);
 });
 
-test("dist manifest keeps the four permissions and two exact origins", async () => {
+test("dist manifest keeps the five permissions and two exact origins", async () => {
   const manifest = JSON.parse(
     await readFile(join(dist, "manifest.json"), "utf8"),
   );
@@ -63,6 +63,7 @@ test("dist manifest keeps the four permissions and two exact origins", async () 
     "debugger",
     "sidePanel",
     "storage",
+    "tabs",
   ]);
   assert.equal(manifest.host_permissions.length, 2);
   for (const pattern of manifest.host_permissions) {
