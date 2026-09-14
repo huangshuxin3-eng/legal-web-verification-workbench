@@ -1,0 +1,34 @@
+{
+  "name": "nonlit-workbench",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "format": "prettier --write src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md",
+    "format:check": "prettier --check src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md",
+    "test:db": "node --experimental-strip-types --test tests/*.test.ts",
+    "extension:build": "npm --prefix extension run build",
+    "extension:test": "npm --prefix extension test"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sharp": "^0.35.4"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.3.14",
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "prettier": "^3.9.6",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.0"
+  }
+}

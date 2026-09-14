@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>留痕预览</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+    <style>
+      body {
+        padding: 20px;
+      }
+      iframe {
+        width: 100%;
+        height: calc(100vh - 90px);
+        border: 1px solid #ccd4dc;
+      }
+    </style>
+  </head>
+  <body>
+    <h1 id="name">留痕预览</h1>
+    <p id="error" role="alert"></p>
+    <iframe id="preview" hidden title="Private Storage 留痕预览"></iframe>
+    <script type="module" src="viewer.mjs"></script>
+  </body>
+</html>

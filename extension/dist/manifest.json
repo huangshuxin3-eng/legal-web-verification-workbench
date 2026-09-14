@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "非诉网核工作台",
+  "version": "4.0.0",
+  "minimum_chrome_version": "118",
+  "description": "将当前网页生成完整 PDF 留痕并归档到已有 Query。",
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "sidePanel",
+    "storage"
+  ],
+  "action": {
+    "default_title": "打开非诉网核留痕面板"
+  },
+  "background": {
+    "service_worker": "worker.mjs",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "host_permissions": [
+    "https://rcfjgjxwftwkdbiwsavy.supabase.co/*",
+    "http://localhost:3000/*"
+  ]
+}

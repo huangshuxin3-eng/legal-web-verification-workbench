@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>非诉网核留痕</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">LEGAL WEB CHECK</p>
+        <h1>非诉网核留痕</h1>
+      </header>
+      <section id="login" hidden>
+        <h2>登录</h2>
+        <p>使用与网核工作台相同的 Supabase 账号。</p>
+        <form id="login-form">
+          <label
+            >邮箱<input
+              name="email"
+              type="email"
+              autocomplete="username"
+              required /></label
+          ><label
+            >密码<input
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              required /></label
+          ><button>登录</button>
+        </form>
+      </section>
+      <section id="app" hidden>
+        <div class="user-row">
+          <span id="user"></span><button id="logout" class="link">退出</button>
+        </div>
+        <label
+          >Project<select id="project">
+            <option value="">请选择项目</option>
+          </select></label
+        >
+        <label
+          >Task<select id="task" disabled>
+            <option value="">请选择 Task</option>
+          </select></label
+        >
+        <p id="task-site" class="muted"></p>
+        <label
+          >Query<select id="query" disabled>
+            <option value="">请选择 Query</option>
+          </select></label
+        >
+        <p id="no-query" class="notice" hidden>请先在网核工作台创建 Query。</p>
+        <div class="url-card">
+          <span>当前网页 URL</span>
+          <p id="current-url">正在读取…</p>
+          <button id="refresh-url" class="link">刷新 URL</button>
+        </div>
+        <p>当前留痕数量：<strong id="count">—</strong></p>
+        <p class="debug-note">
+          生成完整 PDF 留痕时，Chrome
+          会短暂显示页面正在被扩展调试的提示；生成完成后将立即解除。
+        </p>
+        <button id="archive" class="primary" disabled>留痕并归档</button
+        ><button id="cancel" hidden>取消留痕</button>
+        <div id="success" class="success" hidden>
+          <strong>✓ 留痕已归档</strong>
+          <p id="filename"></p>
+          <button id="view" class="link">查看留痕</button>
+        </div>
+      </section>
+      <p id="status" role="status"></p>
+      <p id="error" role="alert"></p>
+    </main>
+    <script type="module" src="sidepanel.mjs"></script>
+  </body>
+</html>

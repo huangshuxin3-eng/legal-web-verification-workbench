@@ -1,0 +1,130 @@
+:root {
+  font:
+    14px/1.5 system-ui,
+    "Microsoft YaHei",
+    sans-serif;
+  color: #17202a;
+  background: #f4f6f8;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  padding: 20px;
+}
+header {
+  margin-bottom: 22px;
+}
+.eyebrow {
+  margin: 0;
+  color: #2563a9;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+h1 {
+  margin: 4px 0;
+  font-size: 22px;
+}
+h2 {
+  font-size: 17px;
+}
+section {
+  background: #fff;
+  border: 1px solid #dce2e8;
+  border-radius: 10px;
+  padding: 16px;
+}
+label {
+  display: block;
+  margin: 13px 0;
+  color: #43505c;
+  font-size: 12px;
+}
+input,
+select,
+button {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #b9c3cc;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px;
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  color: #234d75;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.primary {
+  background: #245d92;
+  color: #fff;
+  border-color: #245d92;
+  font-weight: 650;
+}
+.link {
+  width: auto;
+  min-height: auto;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #1d62a0;
+}
+.user-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+.muted {
+  color: #687683;
+  font-size: 12px;
+}
+.url-card {
+  margin: 16px 0;
+  padding: 12px;
+  background: #f4f6f8;
+  border-radius: 7px;
+}
+.url-card span {
+  font-size: 11px;
+  color: #65717c;
+}
+.url-card p,
+#filename {
+  overflow-wrap: anywhere;
+}
+.notice,
+.debug-note {
+  padding: 10px;
+  border-radius: 6px;
+  background: #fff7dd;
+  color: #725900;
+  font-size: 12px;
+}
+.success {
+  margin-top: 14px;
+  padding: 12px;
+  background: #eaf8ef;
+  color: #17663a;
+  border-radius: 7px;
+}
+#status {
+  font-size: 12px;
+  color: #36566f;
+}
+#error {
+  font-size: 12px;
+  color: #a11b1b;
+  white-space: pre-wrap;
+}
+[hidden] {
+  display: none !important;
+}
