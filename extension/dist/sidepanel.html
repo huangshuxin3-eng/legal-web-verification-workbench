@@ -62,12 +62,46 @@
           ></div>
         </div>
         <p id="task-site" class="muted"></p>
+        <section id="automation-ready" class="automation-panel" hidden>
+          <p class="automation-eyebrow">自动核查</p>
+          <p class="automation-context-label">核查对象：</p>
+          <strong id="automation-ready-entity"></strong>
+          <p class="automation-context-label">检索词：</p>
+          <strong id="automation-ready-query"></strong>
+          <button id="automation-start" class="automation-start">
+            开始自动核查
+          </button>
+        </section>
+        <section id="automation-panel" class="automation-panel" hidden>
+          <p class="automation-eyebrow">自动核查</p>
+          <p class="automation-context-label">核查对象：</p>
+          <strong id="automation-entity"></strong>
+          <p class="automation-context-label">检索词：</p>
+          <strong id="automation-query-text"></strong>
+          <p id="automation-scope" class="muted"></p>
+          <p class="automation-status-label">状态：</p>
+          <p id="automation-status" class="automation-status"></p>
+          <div id="automation-verification" class="notice" hidden>
+            <strong>需要人工验证</strong>
+            <p>网站要求完成安全验证。请在网页中完成滑块验证。</p>
+          </div>
+          <div id="automation-result" class="automation-result" hidden></div>
+          <button id="automation-continue" class="primary" hidden>
+            验证完成，继续
+          </button>
+          <button id="automation-dismiss" class="link" hidden>
+            返回手工模式
+          </button>
+        </section>
         <label
-          >Query<select id="query" disabled>
+          >Query（手工流程）<select id="query" disabled>
             <option value="">请选择 Query</option>
           </select></label
         >
-        <p id="no-query" class="notice" hidden>请先在网核工作台创建 Query。</p>
+        <p class="muted">当前 Query 仅用于手工留痕，不控制自动核查。</p>
+        <p id="no-query" class="notice" hidden>
+          手工留痕请先在网核工作台创建 Query；自动核查无需预先创建。
+        </p>
         <div class="url-card">
           <span>当前网页 URL</span>
           <p id="current-url">正在读取…</p>

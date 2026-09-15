@@ -1,6 +1,6 @@
 # 非诉网核工作台
 
-依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。Milestone 5 增加应用层批量任务生成器，按“核查对象 × 核查范围”预览、去重并批量创建 Task。Milestone 6 增加项目级网核成果导出，生成一份简单 Excel 清单和按主体、事项整理的 Private Capture ZIP。详细说明见 [MILESTONE_4.md](MILESTONE_4.md)、[MILESTONE_5.md](MILESTONE_5.md) 和 [MILESTONE_6.md](MILESTONE_6.md)。
+依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。Milestone 5 增加应用层批量任务生成器，按“核查对象 × 核查范围”预览、去重并批量创建 Task。Milestone 6 增加项目级网核成果导出，生成一份简单 Excel 清单和按主体、事项整理的 Private Capture ZIP。Milestone 8.1 增加中国执行信息公开网“执行”单 Task 半自动无结果闭环。详细说明见 [MILESTONE_4.md](MILESTONE_4.md)、[MILESTONE_5.md](MILESTONE_5.md)、[MILESTONE_6.md](MILESTONE_6.md) 和 [MILESTONE_8_1.md](MILESTONE_8_1.md)。
 
 已通过 M1/M2 的数据库只执行 `supabase/migrations/202609140003_milestone_3.sql`，不要重跑旧迁移。完整升级、权限、失败恢复和验收说明见 [Milestone 3 交付说明](./MILESTONE_3.md)。仅使用原有 Publishable Key 和登录用户 JWT，没有新增环境变量或 service role 依赖。
 
@@ -23,8 +23,9 @@
 - Task 表按主体、M5 预设事项顺序和创建顺序规范排列，使用完整项目稳定序号及 25/50/100 分页；批量删除的勾选范围严格限制在当前页。
 - Project Workbench 支持导出网核成果 ZIP；只导出有 Capture 的 Task，内含单 Sheet Excel 清单及按主体、事项分层的全部 Private Capture 文件，并复用工作台的规范排序。
 - Chrome Side Panel 使用可搜索 Task Picker，按核查对象、事项、网站名称过滤，并用当前标签页与 Task URL 的完整 hostname 精确匹配推荐项。
+- 支持 `执行 + 中国执行信息公开网` 的确定性半自动核查：每轮固定使用 `Task.entity_name`，不读取手工选中的 Query；滑块始终人工完成，明确无结果后新建本轮 Query 和 PDF Capture，有结果则新建本轮 Query 后暂停等待人工核查，同一 Task 可重复发起并记录多次真实检索。
 
-只使用四张业务表。Web 手动留痕支持 PDF/PNG/JPG、私有预览、中文名下载、确认删除和 Query/Task 留痕计数；Extension 只选择已有 Query 并归档当前网页，不创建或编辑业务数据。
+只使用四张业务表。Web 手动留痕支持 PDF/PNG/JPG、私有预览、中文名下载、确认删除和 Query/Task 留痕计数；Extension 的手工模式仍只选择已有 Query 并归档当前网页，M8.1 仅在确认实际查询结果后创建本次 Query。
 
 项目编辑仍未增加 UI；Project 和 Task 删除入口已经补齐。
 

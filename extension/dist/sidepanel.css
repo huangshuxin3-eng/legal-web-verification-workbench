@@ -109,6 +109,48 @@ label {
   color: #687683;
   font-size: 12px;
 }
+.automation-start {
+  margin: 12px 0 0;
+  border-color: #245d92;
+  color: #245d92;
+  font-weight: 650;
+}
+.automation-context-label {
+  margin: 8px 0 2px;
+  color: #65717c;
+  font-size: 11px;
+}
+.automation-panel {
+  margin: 13px 0;
+  border-color: #bfd3e5;
+  background: #f8fbfe;
+  padding: 13px;
+}
+.automation-eyebrow,
+.automation-status-label {
+  margin: 0 0 4px;
+  color: #65717c;
+  font-size: 11px;
+  font-weight: 700;
+}
+.automation-status {
+  margin: 0 0 12px;
+  color: #234d75;
+  font-weight: 650;
+}
+.automation-result {
+  margin: 10px 0;
+  padding: 10px;
+  border-radius: 6px;
+  background: #eaf8ef;
+  color: #17663a;
+  font-size: 12px;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.automation-panel .link {
+  margin-top: 12px;
+}
 input,
 select,
 button {

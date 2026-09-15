@@ -62,7 +62,7 @@ export async function signOut() {
       method: "POST",
       headers: { ...headers(), Authorization: `Bearer ${current.accessToken}` },
     }).catch(() => {});
-  await chrome.storage.local.remove([KEY, "recentSelection"]);
+  await chrome.storage.local.remove([KEY, "recentSelection", "automationJob"]);
 }
 export async function authorizedFetch(url, options = {}, retry = true) {
   const current = await validSession();

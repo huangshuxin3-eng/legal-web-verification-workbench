@@ -4,6 +4,12 @@ import {
   groupTasksForPicker,
   validSelectedTaskId,
 } from "./lib/task-picker.mjs";
+import { supportsZxgkExecution } from "./adapters/zxgk-execution.mjs";
+import {
+  AUTOMATION_STATES,
+  canRecheckAutomation,
+  canStartNewAutomation,
+} from "./lib/automation-state.mjs";
 
 const $ = (id) => document.getElementById(id);
 let projectRows = [],
@@ -11,7 +17,9 @@ let projectRows = [],
   queryRows = [],
   activeTab = null,
   busy = false,
-  latestCapture = null;
+  latestCapture = null,
+  automationJob = null,
+  automationBusy = false;
 const setError = (message = "") => {
   $("error").textContent = message;
 };
@@ -32,7 +40,21 @@ async function currentTab() {
   updateButton();
 }
 function updateButton() {
-  $("archive").disabled = busy || !$("query").value || !activeTab?.url;
+  const automaticOperation = new Set([
+    AUTOMATION_STATES.OPENING_QUERY_PAGE,
+    AUTOMATION_STATES.FILLING_ENTITY,
+    AUTOMATION_STATES.SUBMITTING_QUERY,
+    AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
+    AUTOMATION_STATES.CHECKING_RESULT,
+    AUTOMATION_STATES.CREATING_QUERY,
+    AUTOMATION_STATES.CAPTURING_NO_RESULT,
+  ]).has(automationJob?.state);
+  $("archive").disabled =
+    busy ||
+    automationBusy ||
+    automaticOperation ||
+    !$("query").value ||
+    !activeTab?.url;
 }
 async function loadProjects() {
   projectRows = await data.projects();
@@ -62,6 +84,7 @@ async function chooseProject(id, restoreTask) {
   if ($("task").value) {
     await chooseTask($("task").value);
   } else {
+    renderAutomation();
     updateButton();
   }
 }
@@ -150,6 +173,7 @@ async function chooseTask(id, restoreQuery) {
   if (restoreQuery && queryRows.some((q) => q.id === restoreQuery))
     $("query").value = restoreQuery;
   await chooseQuery($("query").value);
+  renderAutomation();
 }
 async function chooseQuery(id) {
   const query = queryRows.find((row) => row.id === id);
@@ -166,6 +190,116 @@ async function chooseQuery(id) {
     });
   updateButton();
 }
+
+const automationLabels = {
+  [AUTOMATION_STATES.IDLE]: "待开始",
+  [AUTOMATION_STATES.OPENING_QUERY_PAGE]: "正在打开综合查询页面",
+  [AUTOMATION_STATES.FILLING_ENTITY]: "正在填写查询条件",
+  [AUTOMATION_STATES.SUBMITTING_QUERY]: "正在提交查询",
+  [AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION]: "需要人工验证",
+  [AUTOMATION_STATES.CHECKING_RESULT]: "正在检查查询结果",
+  [AUTOMATION_STATES.CREATING_QUERY]: "正在创建 Query",
+  [AUTOMATION_STATES.CAPTURING_NO_RESULT]: "正在生成并归档无结果留痕",
+  [AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED]: "已发现查询结果，需要人工继续",
+  [AUTOMATION_STATES.PAUSED]: "自动核查已暂停",
+  [AUTOMATION_STATES.FAILED]: "自动核查失败",
+  [AUTOMATION_STATES.DONE]: "查询与留痕已完成",
+};
+function renderAutomation() {
+  const task = taskRows.find((row) => row.id === $("task").value);
+  const canStart =
+    supportsZxgkExecution(task) &&
+    canStartNewAutomation(automationJob);
+  $("automation-ready").hidden = !canStart;
+  $("automation-ready-entity").textContent = task?.entity_name || "";
+  $("automation-ready-query").textContent = task?.entity_name || "";
+  $("automation-start").textContent = automationJob
+    ? "再次自动核查"
+    : "开始自动核查";
+  $("automation-start").disabled = automationBusy;
+  $("automation-panel").hidden = !automationJob;
+  if (!automationJob) {
+    updateButton();
+    return;
+  }
+  $("automation-entity").textContent = automationJob.entityName || "";
+  $("automation-query-text").textContent = automationJob.queryText || "";
+  $("automation-scope").textContent =
+    `${automationJob.topic || "执行"} · ${automationJob.sourceName || "中国执行信息公开网"}`;
+  $("automation-status").textContent =
+    automationLabels[automationJob.state] || automationJob.state;
+  const waiting =
+    automationJob.state === AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION;
+  $("automation-verification").hidden = !waiting;
+  const canContinue = canRecheckAutomation(automationJob);
+  $("automation-continue").hidden = !canContinue;
+  $("automation-continue").disabled =
+    automationBusy || $("task").value !== automationJob.taskId;
+  $("automation-continue").textContent = waiting
+    ? "验证完成，继续"
+    : "重新检查结果";
+  $("automation-dismiss").hidden = false;
+  $("automation-dismiss").disabled = automationBusy;
+  const lines = [];
+  if (automationJob.state === AUTOMATION_STATES.DONE) {
+    lines.push(
+      "✓ 查询完成",
+      "✓ 未发现相关结果",
+      "✓ 已生成 1 份留痕",
+      `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
+      `留痕：${automationJob.filename || "已归档"}`,
+    );
+  } else if (automationJob.state === AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED) {
+    lines.push(
+      "已发现查询结果",
+      "M8.1 暂不支持自动遍历结果详情。",
+      "请人工继续核查并留痕。",
+    );
+  } else if (
+    [AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(
+      automationJob.state,
+    )
+  ) {
+    lines.push(automationJob.error || "自动核查未能继续。请返回手工模式。");
+  }
+  $("automation-result").hidden = !lines.length;
+  $("automation-result").textContent = lines.join("\n");
+  updateButton();
+}
+
+async function automationRequest(type) {
+  if (automationBusy) return;
+  const task = taskRows.find((row) => row.id === $("task").value);
+  if (!task) return;
+  automationBusy = true;
+  setError();
+  renderAutomation();
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type,
+      taskId: task.id,
+      projectId: task.project_id,
+    });
+    if (response?.job) automationJob = response.job;
+    let refreshError = null;
+    if (response?.job?.queryId && $("task").value === response.job.taskId) {
+      try {
+        await chooseTask(response.job.taskId, response.job.queryId);
+      } catch (error) {
+        refreshError = error;
+      }
+    }
+    if (!response?.ok)
+      throw new Error(response?.error || "自动核查失败，请返回手工模式。");
+    if (refreshError) throw refreshError;
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    automationBusy = false;
+    renderAutomation();
+  }
+}
+
 async function initialize() {
   setError();
   await currentTab();
@@ -175,6 +309,8 @@ async function initialize() {
   if (!current) return;
   $("user").textContent = current.user?.email || "已登录用户";
   await loadProjects();
+  automationJob = (await chrome.storage.local.get("automationJob"))
+    .automationJob;
   const recent = (await chrome.storage.local.get("recentSelection"))
     .recentSelection;
   if (recent && projectRows.some((p) => p.id === recent.projectId)) {
@@ -182,6 +318,7 @@ async function initialize() {
     await chooseProject(recent.projectId, recent.taskId);
     if ($("task").value) await chooseTask(recent.taskId, recent.queryId);
   }
+  renderAutomation();
 }
 $("login-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -225,6 +362,21 @@ document.addEventListener("click", (event) => {
 $("query").onchange = () =>
   chooseQuery($("query").value).catch((error) => setError(error.message));
 $("cancel").onclick = () => chrome.runtime.sendMessage({ type: "cancel" });
+$("automation-start").onclick = () => automationRequest("automation-start");
+$("automation-continue").onclick = () =>
+  automationRequest("automation-continue");
+$("automation-dismiss").onclick = async () => {
+  if (automationBusy) return;
+  const response = await chrome.runtime.sendMessage({
+    type: "automation-dismiss",
+  });
+  if (!response?.ok) {
+    setError(response?.error || "暂时无法返回手工模式。");
+    return;
+  }
+  automationJob = null;
+  renderAutomation();
+};
 $("archive").onclick = async () => {
   if (busy) return;
   busy = true;
@@ -267,6 +419,10 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (activeTab?.id === tabId && change.url) currentTab().catch(() => {});
 });
 chrome.storage.onChanged.addListener((changes) => {
+  if (changes.automationJob) {
+    automationJob = changes.automationJob.newValue || null;
+    renderAutomation();
+  }
   const job = changes.captureJob?.newValue;
   if (!busy || !job) return;
   const labels = {
