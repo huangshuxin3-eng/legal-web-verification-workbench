@@ -8,8 +8,8 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "format": "prettier --write src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md",
-    "format:check": "prettier --check src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md",
+    "format": "prettier --write src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md MILESTONE_4.md MILESTONE_5.md",
+    "format:check": "prettier --check src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md MILESTONE_4.md MILESTONE_5.md",
     "test:db": "node --experimental-strip-types --test tests/*.test.ts",
     "extension:build": "npm --prefix extension run build",
     "extension:test": "npm --prefix extension test"

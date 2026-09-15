@@ -1,15 +1,35 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useAuth } from "./auth-provider";
 import { TaskForm } from "./task-form";
 import { TaskDrawer } from "./task-drawer";
 import type { Project, Task, TaskStatus } from "@/lib/database.types";
 import { errorMessage, statusLabels, type TaskInput } from "@/lib/tasks";
 import { taskCaptureCounts, type TaskWithQueryCount } from "@/lib/queries";
+import { createTask, updateTask } from "@/lib/task-repository";
+import { ProjectDeleteDialog } from "./project-delete-dialog";
+import { TaskDeleteDialog } from "./task-delete-dialog";
+import {
+  TaskBatchDeleteDialog,
+  type BatchTaskDeleteResult,
+} from "./task-batch-delete-dialog";
+import {
+  retainVisibleSelection,
+  selectVisibleTasks,
+  toggleTaskSelection,
+} from "@/lib/task-selection";
 
-export function ProjectWorkspace({ projectId }: { projectId: string }) {
+export function ProjectWorkspace({
+  projectId,
+  batchResult,
+}: {
+  projectId: string;
+  batchResult?: { created: number; skipped: number };
+}) {
   const { db } = useAuth();
+  const router = useRouter();
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<TaskWithQueryCount[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,6 +41,19 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
   const [status, setStatus] = useState("");
   const [entity, setEntity] = useState("");
   const [topic, setTopic] = useState("");
+  const [notice, setNotice] = useState("");
+  const [noticeTone, setNoticeTone] = useState<"success" | "warning">(
+    "success",
+  );
+  const [projectMenu, setProjectMenu] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [deletingTask, setDeletingTask] = useState<TaskWithQueryCount | null>(
+    null,
+  );
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -61,6 +94,11 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
   useEffect(() => {
     void load();
   }, [load]);
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(() => setNotice(""), 4000);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
   const filtered = useMemo(
     () =>
       tasks.filter(
@@ -76,28 +114,39 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
       ),
     [tasks, status, entity, topic, search],
   );
+  const visibleTaskIds = useMemo(
+    () => filtered.map((task) => task.id),
+    [filtered],
+  );
+  useEffect(() => {
+    setSelectedTaskIds((current) => {
+      const next = retainVisibleSelection(current, visibleTaskIds);
+      return next.size === current.size ? current : next;
+    });
+  }, [visibleTaskIds]);
+  const selectedTasks = filtered.filter((task) => selectedTaskIds.has(task.id));
+  const allVisibleSelected =
+    filtered.length > 0 && selectedTasks.length === filtered.length;
   const selectedTask = tasks.find((task) => task.id === selected);
   const completed = tasks.filter((task) => task.status === "completed").length;
+  const createdNotice = batchResult?.created ?? 0;
+  const skippedNotice = batchResult?.skipped ?? 0;
+  const projectCounts = {
+    tasks: tasks.length,
+    queries: tasks.reduce(
+      (sum, task) => sum + (task.queries[0]?.count ?? 0),
+      0,
+    ),
+    captures: tasks.reduce((sum, task) => sum + task.capture_count, 0),
+  };
   async function save(input: TaskInput) {
-    const result =
+    const data =
       editor === "new"
-        ? await db
-            .from("tasks")
-            .insert({ ...input, project_id: projectId })
-            .select("*, queries(count)")
-            .single()
-        : await db
-            .from("tasks")
-            .update(input)
-            .eq("id", editor!.id)
-            .eq("project_id", projectId)
-            .select("*, queries(count)")
-            .single();
-    if (result.error) throw result.error;
+        ? await createTask(db, projectId, input)
+        : await updateTask(db, projectId, editor!.id, input);
     const saved = {
-      ...result.data,
-      capture_count:
-        tasks.find((t) => t.id === result.data.id)?.capture_count ?? 0,
+      ...data,
+      capture_count: tasks.find((t) => t.id === data.id)?.capture_count ?? 0,
     };
     setTasks((previous) =>
       editor === "new"
@@ -129,6 +178,30 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
     } finally {
       setPending(null);
     }
+  }
+  function handleTaskDeleted(taskId: string) {
+    setTasks((previous) => previous.filter((task) => task.id !== taskId));
+    setSelected((current) => (current === taskId ? null : current));
+    setDeletingTask(null);
+    setPending(null);
+    setNoticeTone("success");
+    setNotice("任务已永久删除。");
+  }
+  function handleBatchDeleted(result: BatchTaskDeleteResult) {
+    const deleted = new Set(result.deletedIds);
+    const failed = new Set(result.failedIds);
+    setTasks((previous) => previous.filter((task) => !deleted.has(task.id)));
+    setSelectedTaskIds(failed);
+    setSelected((current) =>
+      current && deleted.has(current) ? null : current,
+    );
+    setBatchDeleteOpen(false);
+    setNoticeTone(result.failedIds.length ? "warning" : "success");
+    setNotice(
+      result.failedIds.length
+        ? `已删除 ${result.deletedIds.length} 个任务，${result.failedIds.length} 个任务删除失败，请重试。`
+        : `已删除 ${result.deletedIds.length} 个任务。`,
+    );
   }
   if (loading)
     return (
@@ -164,14 +237,62 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
             项目编号：{project.code || "未填写"}
           </p>
         </div>
-        <button
-          className="btn primary"
-          onClick={() => setEditor("new")}
-          disabled={!!pending}
-        >
-          ＋ 新增 Task
-        </button>
+        <div className="flex flex-wrap gap-3">
+          <Link className="btn" href={`/projects/${projectId}/tasks/generate`}>
+            批量生成任务
+          </Link>
+          <button
+            className="btn primary"
+            onClick={() => setEditor("new")}
+            disabled={!!pending}
+          >
+            ＋ 新增 Task
+          </button>
+          <div className="relative">
+            <button
+              className="btn"
+              aria-label="项目操作"
+              aria-expanded={projectMenu}
+              onClick={() => setProjectMenu((open) => !open)}
+            >
+              …
+            </button>
+            {projectMenu && (
+              <div className="absolute right-0 z-10 mt-2 w-40 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+                <button
+                  className="w-full rounded-md px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
+                  onClick={() => {
+                    setProjectMenu(false);
+                    setDeletingProject(true);
+                  }}
+                >
+                  删除项目
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
+      {(createdNotice > 0 || skippedNotice > 0) && (
+        <p
+          className="mt-5 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800"
+          role="status"
+        >
+          已创建 {createdNotice} 个核查任务，跳过 {skippedNotice} 个已有任务。
+        </p>
+      )}
+      {notice && (
+        <p
+          className={`fixed right-6 bottom-6 z-50 rounded-lg border px-5 py-3 text-sm shadow-lg ${
+            noticeTone === "warning"
+              ? "border-amber-300 bg-amber-50 text-amber-900"
+              : "border-emerald-200 bg-emerald-50 text-emerald-800"
+          }`}
+          role="status"
+        >
+          {notice}
+        </p>
+      )}
       <div className="my-7 flex flex-wrap gap-x-8 gap-y-2 border-y border-slate-200 py-4 text-sm">
         <span>
           Task 总数 <b className="ml-2 text-lg">{tasks.length}</b>
@@ -249,10 +370,42 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
           </button>
         )}
       </div>
+      {selectedTasks.length > 0 && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
+          <span>已选择 {selectedTasks.length} 个任务</span>
+          <button
+            className="font-medium text-red-700"
+            onClick={() => setBatchDeleteOpen(true)}
+          >
+            批量删除
+          </button>
+        </div>
+      )}
       <div className="panel overflow-x-auto">
-        <table className="w-full min-w-[720px]">
+        <table className="w-full min-w-[780px]">
           <thead className="border-b border-slate-200 bg-slate-50">
             <tr>
+              <th className="w-14">
+                <span className="sr-only">选择</span>
+                <input
+                  ref={(input) => {
+                    if (input)
+                      input.indeterminate =
+                        selectedTasks.length > 0 && !allVisibleSelected;
+                  }}
+                  className="h-4 w-4"
+                  type="checkbox"
+                  aria-label="选择当前筛选结果中的全部任务"
+                  checked={allVisibleSelected}
+                  disabled={!filtered.length}
+                  onChange={(event) =>
+                    setSelectedTaskIds(
+                      selectVisibleTasks(visibleTaskIds, event.target.checked),
+                    )
+                  }
+                />
+              </th>
+              <th className="w-16">序号</th>
               <th className="w-40">状态</th>
               <th>核查对象</th>
               <th>核查事项</th>
@@ -263,12 +416,30 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {filtered.map((task) => (
+            {filtered.map((task, index) => (
               <tr
                 key={task.id}
                 className="cursor-pointer hover:bg-slate-50"
                 onClick={() => setSelected(task.id)}
               >
+                <td onClick={(event) => event.stopPropagation()}>
+                  <input
+                    className="h-4 w-4"
+                    type="checkbox"
+                    aria-label={`选择 ${task.entity_name} ${task.topic}`}
+                    checked={selectedTaskIds.has(task.id)}
+                    onChange={(event) =>
+                      setSelectedTaskIds((current) =>
+                        toggleTaskSelection(
+                          current,
+                          task.id,
+                          event.target.checked,
+                        ),
+                      )
+                    }
+                  />
+                </td>
+                <td className="text-slate-500">{index + 1}</td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <select
                     aria-label={`${task.entity_name} ${task.topic} 状态`}
@@ -312,6 +483,16 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
                     >
                       编辑
                     </button>
+                    <button
+                      disabled={!!pending}
+                      className="text-red-700"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setDeletingTask(task);
+                      }}
+                    >
+                      删除
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -320,9 +501,24 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
         </table>
         {filtered.length === 0 && (
           <div className="p-14 text-center text-sm text-slate-500">
-            {tasks.length === 0
-              ? "还没有 Task，点击“新增 Task”开始。"
-              : "没有匹配的 Task，请调整筛选条件。"}
+            {tasks.length === 0 ? (
+              <div>
+                <p className="font-medium text-slate-700">暂无核查任务</p>
+                <div className="mt-4 flex justify-center gap-3">
+                  <Link
+                    className="btn primary"
+                    href={`/projects/${projectId}/tasks/generate`}
+                  >
+                    批量生成任务
+                  </Link>
+                  <button className="btn" onClick={() => setEditor("new")}>
+                    手动新建任务
+                  </button>
+                </div>
+              </div>
+            ) : (
+              "没有匹配的 Task，请调整筛选条件。"
+            )}
           </div>
         )}
       </div>
@@ -339,6 +535,7 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
           onEdit={() => {
             setEditor(selectedTask);
           }}
+          onDeleted={handleTaskDeleted}
         />
       )}
       {editor && (
@@ -346,6 +543,32 @@ export function ProjectWorkspace({ projectId }: { projectId: string }) {
           task={editor === "new" ? undefined : editor}
           onClose={() => setEditor(null)}
           onSave={save}
+        />
+      )}
+      {deletingProject && (
+        <ProjectDeleteDialog
+          project={project}
+          counts={projectCounts}
+          onClose={() => setDeletingProject(false)}
+          onDeleted={() => {
+            router.push("/");
+            router.refresh();
+          }}
+        />
+      )}
+      {deletingTask && (
+        <TaskDeleteDialog
+          task={deletingTask}
+          onClose={() => setDeletingTask(null)}
+          onBusyChange={(busy) => setPending(busy ? deletingTask.id : null)}
+          onDeleted={handleTaskDeleted}
+        />
+      )}
+      {batchDeleteOpen && selectedTasks.length > 0 && (
+        <TaskBatchDeleteDialog
+          tasks={selectedTasks}
+          onClose={() => setBatchDeleteOpen(false)}
+          onCompleted={handleBatchDeleted}
         />
       )}
     </main>

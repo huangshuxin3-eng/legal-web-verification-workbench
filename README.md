@@ -1,6 +1,6 @@
-# 非诉网核工作台 · Milestone 3
+# 非诉网核工作台
 
-依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。详细交付、构建及验收见 [MILESTONE_4.md](MILESTONE_4.md)。
+依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。Milestone 5 增加应用层批量任务生成器，按“核查对象 × 核查范围”预览、去重并批量创建 Task。详细说明见 [MILESTONE_4.md](MILESTONE_4.md) 和 [MILESTONE_5.md](MILESTONE_5.md)。
 
 已通过 M1/M2 的数据库只执行 `supabase/migrations/202609140003_milestone_3.sql`，不要重跑旧迁移。完整升级、权限、失败恢复和验收说明见 [Milestone 3 交付说明](./MILESTONE_3.md)。仅使用原有 Publishable Key 和登录用户 JWT，没有新增环境变量或 service role 依赖。
 
@@ -18,10 +18,13 @@
 - 加载、空列表、无搜索结果、失败重试、无权访问状态。
 - Drawer 查询记录：自动编号、新增、编辑、确认删除，展示创建时间；工作台显示真实 Query 数量。
 - 每个 Task 保存已分配编号上限，删除不复用；首次 Query 创建与 not_started → in_progress 在同一事务完成。
+- Project 工作台可进入三步批量任务生成器；预设范围保存在应用配置中，URL 必须由应用明确配置或由用户本次填写后才能创建。
+- Task Drawer 支持永久删除 Task；Project 工作台的项目操作菜单支持输入完整名称后永久删除 Project。父级删除逐条复用留痕删除协调协议，先清理 Private Storage 文件再删除数据库记录。
+- Task 表支持勾选当前筛选结果中的多个 Task 批量删除；服务端顺序复用同一层级删除服务，并分别返回成功项和失败项以支持安全重试。
 
 只使用四张业务表。Web 手动留痕支持 PDF/PNG/JPG、私有预览、中文名下载、确认删除和 Query/Task 留痕计数；Extension 只选择已有 Query 并归档当前网页，不创建或编辑业务数据。
 
-项目编辑/删除、Task 删除未增加 UI：本阶段指定的项目操作是新建/进入，Task 操作是新增/编辑/状态管理。数据库已允许所有者 CRUD，并验证删除级联。
+项目编辑仍未增加 UI；Project 和 Task 删除入口已经补齐。
 
 ## 2. 数据库 Schema / Migration
 

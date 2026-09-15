@@ -4,18 +4,22 @@ import type { TaskWithQueryCount } from "@/lib/queries";
 import { safeWebsite, statusClasses, statusLabels } from "@/lib/tasks";
 import { Dialog } from "./dialog";
 import { QuerySection } from "./query-section";
+import { TaskDeleteDialog } from "./task-delete-dialog";
 export function TaskDrawer({
   task,
   onClose,
   onEdit,
   onTaskUpdated,
+  onDeleted,
 }: {
   task: TaskWithQueryCount;
   onTaskUpdated: (task: TaskWithQueryCount) => void;
   onClose: () => void;
   onEdit: () => void;
+  onDeleted: (taskId: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const url = safeWebsite(task.source_url);
   return (
     <Dialog title="Task 详情" onClose={onClose} drawer busy={busy}>
@@ -67,6 +71,24 @@ export function TaskDrawer({
         onTaskUpdated={onTaskUpdated}
         onBusyChange={setBusy}
       />
+      <section className="mt-8 border-t border-red-200 pt-6">
+        <h2 className="text-sm font-semibold text-red-800">危险操作</h2>
+        <button
+          className="btn mt-3 w-full border-red-300 text-red-700 hover:bg-red-50"
+          disabled={busy}
+          onClick={() => setConfirmingDelete(true)}
+        >
+          删除任务
+        </button>
+      </section>
+      {confirmingDelete && (
+        <TaskDeleteDialog
+          task={task}
+          onClose={() => setConfirmingDelete(false)}
+          onBusyChange={setBusy}
+          onDeleted={onDeleted}
+        />
+      )}
     </Dialog>
   );
 }
