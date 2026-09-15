@@ -4,16 +4,29 @@ import * as data from "./lib/data.mjs";
 import { businessName } from "./lib/names.mjs";
 import { printTab } from "./lib/print.mjs";
 import { evaluateInTab } from "./lib/debugger-evaluate.mjs";
-import { createZxgkAutomation } from "./lib/zxgk-automation.mjs";
 import {
+  AUTOMATION_QUERY_UNAVAILABLE_MESSAGE,
+  createZxgkAutomation,
+} from "./lib/zxgk-automation.mjs";
+import {
+  buildRowKey,
   classifyZxgkExecutionResult,
+  closeDetailExpression,
+  detailIdentityExpression,
   fillEntityExpression,
+  isZxgkDetailPage,
   isZxgkExecutionPage,
+  openDetailExpression,
+  resultRowsExpression,
   resultSnapshotExpression,
   submitQueryExpression,
   ZXGK_EXECUTION_URL,
 } from "./adapters/zxgk-execution.mjs";
-import { AUTOMATION_STATES } from "./lib/automation-state.mjs";
+import {
+  AUTOMATION_INTERRUPTED_STATES,
+  AUTOMATION_STATES,
+  isAutomationRunning,
+} from "./lib/automation-state.mjs";
 
 let running = null;
 let automationOperation = null;
@@ -69,7 +82,15 @@ async function uploadPdf(queryId, sourceUrl, requestId, blob) {
   }
   return body;
 }
-async function archive(queryId, requestedTabId) {
+/**
+ * Query 读不到时的文案按上下文区分。手工上下文由用户自己重新选择；
+ * 自动核查上下文只能停下来交人工，绝不新建或静默切换 Query。
+ */
+const queryUnavailableMessage = {
+  manual: "当前手工 Query 已删除或无法访问，请重新选择。",
+  automation: AUTOMATION_QUERY_UNAVAILABLE_MESSAGE,
+};
+async function archive(queryId, requestedTabId, context = "manual") {
   if (running) throw new Error("已有留痕任务正在执行，请等待完成。");
   const controller = new AbortController();
   running = controller;
@@ -84,7 +105,13 @@ async function archive(queryId, requestedTabId) {
       previous.requestId
     )
       requestId = previous.requestId;
-    const context = await data.queryContext(queryId);
+    let queryRow;
+    try {
+      queryRow = await data.queryContext(queryId);
+    } catch (error) {
+      if (error?.code !== data.QUERY_NOT_ACCESSIBLE) throw error;
+      throw new Error(queryUnavailableMessage[context] || error.message);
+    }
     const tab = requestedTabId
       ? await chrome.tabs.get(requestedTabId).catch(() => null)
       : (
@@ -93,8 +120,10 @@ async function archive(queryId, requestedTabId) {
             currentWindow: true,
           })
         )[0];
-    if (!tab?.id || !tab.url || !supported(tab.url))
+    if (!tab?.id || !tab.url || !supported(tab.url)) {
+      if (requestedTabId) throw new Error("目标标签页已关闭，本次未归档。");
       throw new Error(unsupportedMessage);
+    }
     const frozen = { tabId: tab.id, sourceUrl: tab.url };
     await saveJob({
       status: "running",
@@ -141,8 +170,8 @@ async function archive(queryId, requestedTabId) {
       new Blob([bytes], { type: "application/pdf" }),
     );
     const filename = businessName(
-      context.tasks,
-      context.query_no,
+      queryRow.tasks,
+      queryRow.query_no,
       capture.capture_no,
       capture.created_at,
     );
@@ -222,6 +251,28 @@ async function openQueryPage(tabId, currentUrl) {
     throw new Error("页面未进入中国执行信息公开网综合查询入口。");
 }
 
+/**
+ * 原自动化标签页已关闭时新建一个，并等到它真正落在综合查询入口。
+ * 刻意不等待“状态变成 complete 就返回”：新建标签页可能先短暂停在初始页，
+ * 这里以“URL 已是查询入口且加载完成”为准，避免误判。
+ */
+async function createQueryTab() {
+  const tab = await chrome.tabs.create({
+    url: ZXGK_EXECUTION_URL,
+    active: true,
+  });
+  if (!tab?.id) throw new Error("无法创建用于自动核查的标签页。");
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    const current = await chrome.tabs.get(tab.id).catch(() => null);
+    if (!current) throw new Error("新建的自动核查标签页已关闭。");
+    if (current.status === "complete" && isZxgkExecutionPage(current.url))
+      return { id: current.id, url: current.url };
+    await sleep(250);
+  }
+  throw new Error("新建的自动核查标签页未进入综合查询入口。");
+}
+
 async function checkedTab(tabId, reportedUrl) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   const url = tab?.url || reportedUrl;
@@ -230,12 +281,102 @@ async function checkedTab(tabId, reportedUrl) {
   return tab;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const pollIntervalMs = 250;
+const detailTabTimeoutMs = 20000;
+
+/** 读取综合查询结果页：必须先确认标签页本身仍是结果页。 */
+async function readResultPage(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) throw new Error("综合查询结果标签页已关闭，自动核查已停止。");
+  if (!isZxgkExecutionPage(tab.url))
+    throw new Error("综合查询结果标签页已跳转到其他页面，自动核查已停止。");
+  return evaluateInTab(tabId, resultRowsExpression());
+}
+
+/**
+ * 点击“查看”。真实页面会 window.open("detail.html", "_blank") 打开新标签页，
+ * 因此这里在点击前后对比标签页集合，等到新的详情标签页出现才继续。
+ */
+async function openDetailTab(listTabId, rowKey) {
+  const known = new Set((await chrome.tabs.query({})).map((tab) => tab.id));
+  const clicked = await evaluateInTab(listTabId, openDetailExpression(rowKey));
+  if (!clicked?.ok)
+    throw new Error(clicked?.error || "未能在结果列表中定位该条结果。");
+  if (buildRowKey(clicked) !== rowKey)
+    throw new Error("点击“查看”前的身份校验失败，未打开详情。");
+  const deadline = Date.now() + detailTabTimeoutMs;
+  for (;;) {
+    const tabs = await chrome.tabs.query({});
+    const created = tabs.find(
+      (tab) => !known.has(tab.id) && isZxgkDetailPage(tab.url),
+    );
+    if (created) return { detailTabId: created.id, url: created.url };
+    if (Date.now() >= deadline)
+      throw new Error(
+        "点击“查看”后未能在限定时间内打开详情标签页。请确认页面是否需要重新完成安全验证。",
+      );
+    await sleep(pollIntervalMs);
+  }
+}
+
+/** 等待详情页渲染完成，并返回其案号等信息用于身份校验。 */
+async function readDetailIdentity(detailTabId) {
+  const deadline = Date.now() + detailTabTimeoutMs;
+  for (;;) {
+    const tab = await chrome.tabs.get(detailTabId).catch(() => null);
+    if (!tab) return { ok: false, closed: true };
+    if (!isZxgkDetailPage(tab.url))
+      return { ok: false, error: "详情标签页已跳转到其他页面。" };
+    const identity = await evaluateInTab(
+      detailTabId,
+      detailIdentityExpression(),
+    );
+    if (identity?.errorText || identity?.rowCount) return identity;
+    if (Date.now() >= deadline) return { ok: false, timeout: true };
+    await sleep(pollIntervalMs);
+  }
+}
+
+async function waitForTabGone(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!(await chrome.tabs.get(tabId).catch(() => null))) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(pollIntervalMs);
+  }
+}
+
+/**
+ * 返回列表：点击详情页网站自带的「关闭」按钮（goBack() → window.close()），
+ * 然后必须等到该标签页确实关闭。列表标签页从未被导航，因此不使用 history。
+ */
+async function closeDetailTab(detailTabId, listTabId) {
+  let failure = null;
+  try {
+    const closed = await evaluateInTab(detailTabId, closeDetailExpression());
+    if (!closed?.ok)
+      failure = new Error(closed?.error || "详情页未提供「关闭」按钮。");
+  } catch (error) {
+    failure = error;
+  }
+  const gone = await waitForTabGone(detailTabId, failure ? 3000 : 15000);
+  if (!gone)
+    throw (
+      failure ||
+      new Error("详情页「关闭」后标签页仍未关闭，无法确认已返回结果列表。")
+    );
+  await chrome.tabs.update(listTabId, { active: true }).catch(() => {});
+}
+
 const automation = createZxgkAutomation({
   now: () => new Date(),
   getTask: data.task,
   getActiveTab: async () =>
     (await chrome.tabs.query({ active: true, currentWindow: true }))[0] || null,
   getTab: async (tabId) => chrome.tabs.get(tabId).catch(() => null),
+  // 仅在原自动化标签页已关闭时使用：新建专用标签页，不导航用户当前活动标签页。
+  createTab: createQueryTab,
   getJob: async () =>
     (await chrome.storage.local.get("automationJob")).automationJob || null,
   saveJob: async (job) => {
@@ -256,35 +397,25 @@ const automation = createZxgkAutomation({
     const snapshot = await evaluateInTab(tabId, resultSnapshotExpression());
     return classifyZxgkExecutionResult(snapshot);
   },
+  readResultPage,
+  openDetail: openDetailTab,
+  readDetailIdentity,
+  closeDetail: closeDetailTab,
+  listTaskQueries: data.taskQueries,
+  getQuery: data.query,
   createQuery: data.createQuery,
-  archiveQuery: archive,
+  // 自动核查的归档走同一个 M4 链路，但 Query 失效的文案必须属于自动核查上下文。
+  archiveQuery: (queryId, tabId) => archive(queryId, tabId, "automation"),
 });
 
-const automationLockedStates = new Set([
-  AUTOMATION_STATES.OPENING_QUERY_PAGE,
-  AUTOMATION_STATES.FILLING_ENTITY,
-  AUTOMATION_STATES.SUBMITTING_QUERY,
-  AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
-  AUTOMATION_STATES.CHECKING_RESULT,
-  AUTOMATION_STATES.CREATING_QUERY,
-  AUTOMATION_STATES.CAPTURING_NO_RESULT,
-]);
-const interruptedAutomationStates = new Set([
-  AUTOMATION_STATES.OPENING_QUERY_PAGE,
-  AUTOMATION_STATES.FILLING_ENTITY,
-  AUTOMATION_STATES.SUBMITTING_QUERY,
-  AUTOMATION_STATES.CHECKING_RESULT,
-  AUTOMATION_STATES.CREATING_QUERY,
-  AUTOMATION_STATES.CAPTURING_NO_RESULT,
-]);
 chrome.storage.local.get("automationJob").then(({ automationJob }) => {
-  if (!interruptedAutomationStates.has(automationJob?.state)) return;
+  if (!AUTOMATION_INTERRUPTED_STATES.includes(automationJob?.state)) return;
   chrome.storage.local.set({
     automationJob: {
       ...automationJob,
       state: AUTOMATION_STATES.FAILED,
       error:
-        "扩展后台在自动操作期间中断，无法确认上一步结果。请检查网页和 Query 后返回手工模式。",
+        "扩展后台在自动操作期间中断，无法确认上一步是否完成。已生成的 Query 与留痕全部保留，可在 Side Panel 中「继续本次核查」。",
       updatedAt: new Date().toISOString(),
     },
   });
@@ -326,7 +457,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   }
   if (message?.type === "automation-start") {
     chrome.storage.local.get("automationJob").then(({ automationJob }) => {
-      if (automationLockedStates.has(automationJob?.state)) {
+      if (isAutomationRunning(automationJob)) {
         reply({
           ok: false,
           error: "已有自动核查正在等待处理，请先完成或返回手工模式。",
@@ -343,6 +474,13 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         reply,
       );
     });
+    return true;
+  }
+  if (message?.type === "automation-resume") {
+    void runAutomation(
+      () => automation.resume({ taskId: message.taskId }),
+      reply,
+    );
     return true;
   }
   if (message?.type === "automation-continue") {

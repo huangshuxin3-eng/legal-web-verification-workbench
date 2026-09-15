@@ -4,11 +4,17 @@ import {
   groupTasksForPicker,
   validSelectedTaskId,
 } from "./lib/task-picker.mjs";
-import { supportsZxgkExecution } from "./adapters/zxgk-execution.mjs";
+import {
+  caseNoFromRowKey,
+  supportsZxgkExecution,
+} from "./adapters/zxgk-execution.mjs";
 import {
   AUTOMATION_STATES,
   canRecheckAutomation,
+  canResumeFirstPage,
   canStartNewAutomation,
+  hasListCapture,
+  isAutomationRunning,
 } from "./lib/automation-state.mjs";
 
 const $ = (id) => document.getElementById(id);
@@ -40,19 +46,10 @@ async function currentTab() {
   updateButton();
 }
 function updateButton() {
-  const automaticOperation = new Set([
-    AUTOMATION_STATES.OPENING_QUERY_PAGE,
-    AUTOMATION_STATES.FILLING_ENTITY,
-    AUTOMATION_STATES.SUBMITTING_QUERY,
-    AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
-    AUTOMATION_STATES.CHECKING_RESULT,
-    AUTOMATION_STATES.CREATING_QUERY,
-    AUTOMATION_STATES.CAPTURING_NO_RESULT,
-  ]).has(automationJob?.state);
   $("archive").disabled =
     busy ||
     automationBusy ||
-    automaticOperation ||
+    isAutomationRunning(automationJob) ||
     !$("query").value ||
     !activeTab?.url;
 }
@@ -201,10 +198,48 @@ const automationLabels = {
   [AUTOMATION_STATES.CREATING_QUERY]: "正在创建 Query",
   [AUTOMATION_STATES.CAPTURING_NO_RESULT]: "正在生成并归档无结果留痕",
   [AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED]: "已发现查询结果，需要人工继续",
+  [AUTOMATION_STATES.CAPTURING_LIST_PAGE]: "正在留痕第一页结果列表",
+  [AUTOMATION_STATES.READING_RESULT_ROWS]: "正在读取第一页结果",
+  [AUTOMATION_STATES.OPENING_DETAIL]: "正在打开结果详情",
+  [AUTOMATION_STATES.CAPTURING_DETAIL]: "正在留痕结果详情",
+  [AUTOMATION_STATES.RETURNING_TO_LIST]: "正在返回第一页结果列表",
+  [AUTOMATION_STATES.VERIFYING_LIST_STATE]: "正在校验第一页结果状态",
+  [AUTOMATION_STATES.FIRST_PAGE_COMPLETE]: "第 1 页已完整处理",
   [AUTOMATION_STATES.PAUSED]: "自动核查已暂停",
   [AUTOMATION_STATES.FAILED]: "自动核查失败",
   [AUTOMATION_STATES.DONE]: "查询与留痕已完成",
 };
+/** M8.2a 第一页循环中的状态，用于显示进度而不是最终结论。 */
+const firstPageStates = [
+  AUTOMATION_STATES.CAPTURING_LIST_PAGE,
+  AUTOMATION_STATES.READING_RESULT_ROWS,
+  AUTOMATION_STATES.OPENING_DETAIL,
+  AUTOMATION_STATES.CAPTURING_DETAIL,
+  AUTOMATION_STATES.RETURNING_TO_LIST,
+  AUTOMATION_STATES.VERIFYING_LIST_STATE,
+];
+
+/**
+ * 未完成的第一页核查：显示真实进度，并把「继续本次核查」作为主要动作。
+ * 继续沿用同一个 Query 与同一份已完成留痕，不会从第 1 条重新开始。
+ */
+function firstPageProgressLines(job) {
+  const done = job.completedDetailKeys || [];
+  const expected = job.expectedDetailCount ?? 0;
+  const next = (job.pageOneRowKeys || []).find((key) => !done.includes(key));
+  const caseNo = next ? caseNoFromRowKey(next) : "";
+  // Capture 已经 finalize 成功但尚未收尾时也算已留痕，不谎报“待留痕”。
+  const listDone = hasListCapture(job);
+  const lines = [
+    "本次核查未完成",
+    listDone ? "✓ 第 1 页列表：已留痕" : "◦ 第 1 页列表：待留痕",
+    `详情：${done.length} / ${expected}`,
+    `已生成留痕：${(listDone ? 1 : 0) + done.length}`,
+  ];
+  if (caseNo) lines.push(`下一项：${caseNo}`);
+  lines.push("继续本次核查将从下一个未完成项开始，不会重复已完成的留痕。");
+  return lines;
+}
 function renderAutomation() {
   const task = taskRows.find((row) => row.id === $("task").value);
   const canStart =
@@ -219,9 +254,13 @@ function renderAutomation() {
   $("automation-start").disabled = automationBusy;
   $("automation-panel").hidden = !automationJob;
   if (!automationJob) {
+    $("automation-start").hidden = false;
+    $("automation-resume").hidden = true;
+    $("automation-resume-block").hidden = true;
     updateButton();
     return;
   }
+  const resumable = canResumeFirstPage(automationJob);
   $("automation-entity").textContent = automationJob.entityName || "";
   $("automation-query-text").textContent = automationJob.queryText || "";
   $("automation-scope").textContent =
@@ -238,8 +277,20 @@ function renderAutomation() {
   $("automation-continue").textContent = waiting
     ? "验证完成，继续"
     : "重新检查结果";
+  // 有未完成进度时，主要动作是「继续本次核查」，而不是重新开始。
+  $("automation-start").hidden = resumable;
+  $("automation-resume").hidden = !resumable;
+  $("automation-resume").disabled =
+    automationBusy || $("task").value !== automationJob.taskId;
+  $("automation-resume-block").hidden = !resumable;
+  $("automation-resume-block").textContent = resumable
+    ? firstPageProgressLines(automationJob).join("\n")
+    : "";
   $("automation-dismiss").hidden = false;
   $("automation-dismiss").disabled = automationBusy;
+  $("automation-dismiss").textContent = resumable
+    ? "放弃本次核查"
+    : "返回手工模式";
   const lines = [];
   if (automationJob.state === AUTOMATION_STATES.DONE) {
     lines.push(
@@ -249,6 +300,29 @@ function renderAutomation() {
       `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
       `留痕：${automationJob.filename || "已归档"}`,
     );
+  } else if (automationJob.state === AUTOMATION_STATES.FIRST_PAGE_COMPLETE) {
+    const completed = automationJob.completedDetailKeys?.length ?? 0;
+    const expected = automationJob.expectedDetailCount ?? 0;
+    lines.push(
+      "第 1 页已完整处理",
+      "✓ 结果列表：1 / 1",
+      `✓ 详情：${completed} / ${expected}`,
+      `✓ 本页新增留痕：${completed + 1}`,
+    );
+    const totalPages = automationJob.resultPage?.totalPages;
+    if (totalPages)
+      lines.push("当前已自动处理：第 1 页", `网站结果页：共 ${totalPages} 页`);
+    lines.push("后续分页暂未自动执行。请人工继续核查。");
+  } else if (firstPageStates.includes(automationJob.state)) {
+    const operation = automationJob.currentOperation || {};
+    const completed = automationJob.completedDetailKeys?.length ?? 0;
+    const expected = automationJob.expectedDetailCount ?? 0;
+    const listDone = hasListCapture(automationJob);
+    lines.push("正在处理第 1 页");
+    lines.push(listDone ? "✓ 列表留痕已完成" : "◦ 列表留痕待完成");
+    if (expected) lines.push(`详情：${completed} / ${expected}`);
+    if (operation.caseNo) lines.push(`当前处理：${operation.caseNo}`);
+    lines.push(`累计新增留痕：${(listDone ? 1 : 0) + completed}`);
   } else if (automationJob.state === AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED) {
     lines.push(
       "已发现查询结果",
@@ -267,6 +341,16 @@ function renderAutomation() {
   updateButton();
 }
 
+/**
+ * 自动核查自身的失败已经显示在自动核查卡片里（automationJob.error）。
+ * 这类错误不再占用页面底部的错误行，避免与手工 Query 的错误混在一起。
+ */
+function automationErrorShownInCard(job) {
+  return (
+    [AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(job?.state) &&
+    Boolean(job?.error)
+  );
+}
 async function automationRequest(type) {
   if (automationBusy) return;
   const task = taskRows.find((row) => row.id === $("task").value);
@@ -289,8 +373,12 @@ async function automationRequest(type) {
         refreshError = error;
       }
     }
-    if (!response?.ok)
-      throw new Error(response?.error || "自动核查失败，请返回手工模式。");
+    if (!response?.ok) {
+      if (!automationErrorShownInCard(response?.job))
+        throw new Error(response?.error || "自动核查失败，请返回手工模式。");
+      if (refreshError) throw refreshError;
+      return;
+    }
     if (refreshError) throw refreshError;
   } catch (error) {
     setError(error.message);
@@ -363,6 +451,7 @@ $("query").onchange = () =>
   chooseQuery($("query").value).catch((error) => setError(error.message));
 $("cancel").onclick = () => chrome.runtime.sendMessage({ type: "cancel" });
 $("automation-start").onclick = () => automationRequest("automation-start");
+$("automation-resume").onclick = () => automationRequest("automation-resume");
 $("automation-continue").onclick = () =>
   automationRequest("automation-continue");
 $("automation-dismiss").onclick = async () => {
