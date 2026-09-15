@@ -40,11 +40,27 @@
             <option value="">请选择项目</option>
           </select></label
         >
-        <label
-          >Task<select id="task" disabled>
-            <option value="">请选择 Task</option>
-          </select></label
-        >
+        <div class="task-field">
+          <label for="task-search">Task</label>
+          <input id="task" type="hidden" />
+          <input
+            id="task-search"
+            type="search"
+            placeholder="搜索核查对象、事项或网站"
+            role="combobox"
+            aria-controls="task-options"
+            aria-expanded="false"
+            autocomplete="off"
+            disabled
+          />
+          <div id="selected-task" class="selected-task muted">请选择 Task</div>
+          <div
+            id="task-options"
+            class="task-options"
+            role="listbox"
+            hidden
+          ></div>
+        </div>
         <p id="task-site" class="muted"></p>
         <label
           >Query<select id="query" disabled>

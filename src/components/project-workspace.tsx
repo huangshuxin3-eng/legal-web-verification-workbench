@@ -10,6 +10,7 @@ import { errorMessage, statusLabels, type TaskInput } from "@/lib/tasks";
 import { taskCaptureCounts, type TaskWithQueryCount } from "@/lib/queries";
 import { createTask, updateTask } from "@/lib/task-repository";
 import { ProjectDeleteDialog } from "./project-delete-dialog";
+import { ProjectExportDialog } from "./project-export-dialog";
 import { TaskDeleteDialog } from "./task-delete-dialog";
 import {
   TaskBatchDeleteDialog,
@@ -20,6 +21,13 @@ import {
   selectVisibleTasks,
   toggleTaskSelection,
 } from "@/lib/task-selection";
+import { sortTasksCanonical, taskSequenceMap } from "@/lib/task-order";
+import {
+  filterTasks,
+  paginateTasks,
+  TASK_PAGE_SIZES,
+  type TaskPageSize,
+} from "@/lib/task-view";
 
 export function ProjectWorkspace({
   projectId,
@@ -54,6 +62,9 @@ export function ProjectWorkspace({
     () => new Set(),
   );
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<TaskPageSize>(25);
   const load = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -99,34 +110,35 @@ export function ProjectWorkspace({
     const timeout = window.setTimeout(() => setNotice(""), 4000);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+  const orderedTasks = useMemo(() => sortTasksCanonical(tasks), [tasks]);
+  const sequenceByTask = useMemo(() => taskSequenceMap(tasks), [tasks]);
   const filtered = useMemo(
-    () =>
-      tasks.filter(
-        (task) =>
-          (!status || task.status === status) &&
-          (!entity || task.entity_name === entity) &&
-          (!topic || task.topic === topic) &&
-          [task.entity_name, task.topic, task.source_name].some((value) =>
-            value
-              .toLocaleLowerCase()
-              .includes(search.trim().toLocaleLowerCase()),
-          ),
-      ),
-    [tasks, status, entity, topic, search],
+    () => filterTasks(orderedTasks, { search, status, entity, topic }),
+    [orderedTasks, search, status, entity, topic],
   );
+  const pagination = useMemo(
+    () => paginateTasks(filtered, page, pageSize),
+    [filtered, page, pageSize],
+  );
+  const pageTasks = pagination.items;
   const visibleTaskIds = useMemo(
-    () => filtered.map((task) => task.id),
-    [filtered],
+    () => pageTasks.map((task) => task.id),
+    [pageTasks],
   );
+  useEffect(() => {
+    if (page !== pagination.page) setPage(pagination.page);
+  }, [page, pagination.page]);
   useEffect(() => {
     setSelectedTaskIds((current) => {
       const next = retainVisibleSelection(current, visibleTaskIds);
       return next.size === current.size ? current : next;
     });
   }, [visibleTaskIds]);
-  const selectedTasks = filtered.filter((task) => selectedTaskIds.has(task.id));
+  const selectedTasks = pageTasks.filter((task) =>
+    selectedTaskIds.has(task.id),
+  );
   const allVisibleSelected =
-    filtered.length > 0 && selectedTasks.length === filtered.length;
+    pageTasks.length > 0 && selectedTasks.length === pageTasks.length;
   const selectedTask = tasks.find((task) => task.id === selected);
   const completed = tasks.filter((task) => task.status === "completed").length;
   const createdNotice = batchResult?.created ?? 0;
@@ -138,6 +150,15 @@ export function ProjectWorkspace({
       0,
     ),
     captures: tasks.reduce((sum, task) => sum + task.capture_count, 0),
+  };
+  const exportableTasks = tasks.filter((task) => task.capture_count > 0);
+  const exportCounts = {
+    entities: new Set(exportableTasks.map((task) => task.entity_name)).size,
+    tasks: exportableTasks.length,
+    captures: exportableTasks.reduce(
+      (sum, task) => sum + task.capture_count,
+      0,
+    ),
   };
   async function save(input: TaskInput) {
     const data =
@@ -238,6 +259,9 @@ export function ProjectWorkspace({
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
+          <button className="btn" onClick={() => setExportOpen(true)}>
+            导出网核成果
+          </button>
           <Link className="btn" href={`/projects/${projectId}/tasks/generate`}>
             批量生成任务
           </Link>
@@ -318,12 +342,21 @@ export function ProjectWorkspace({
           <input
             placeholder="核查对象、事项或网站名称"
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
           />
         </label>
         <label>
           状态
-          <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <select
+            value={status}
+            onChange={(e) => {
+              setStatus(e.target.value);
+              setPage(1);
+            }}
+          >
             <option value="">全部状态</option>
             {Object.entries(statusLabels).map(([value, label]) => (
               <option key={value} value={value}>
@@ -334,7 +367,13 @@ export function ProjectWorkspace({
         </label>
         <label>
           核查对象
-          <select value={entity} onChange={(e) => setEntity(e.target.value)}>
+          <select
+            value={entity}
+            onChange={(e) => {
+              setEntity(e.target.value);
+              setPage(1);
+            }}
+          >
             <option value="">全部对象</option>
             {[...new Set(tasks.map((t) => t.entity_name))]
               .sort()
@@ -345,7 +384,13 @@ export function ProjectWorkspace({
         </label>
         <label>
           核查事项
-          <select value={topic} onChange={(e) => setTopic(e.target.value)}>
+          <select
+            value={topic}
+            onChange={(e) => {
+              setTopic(e.target.value);
+              setPage(1);
+            }}
+          >
             <option value="">全部事项</option>
             {[...new Set(tasks.map((t) => t.topic))].sort().map((value) => (
               <option key={value}>{value}</option>
@@ -355,7 +400,7 @@ export function ProjectWorkspace({
       </section>
       <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
         <span>
-          显示 {filtered.length} / {tasks.length} 项 Task
+          显示 {pagination.start}–{pagination.end} / {filtered.length} 项 Task
         </span>
         {(search || status || entity || topic) && (
           <button
@@ -364,6 +409,7 @@ export function ProjectWorkspace({
               setStatus("");
               setEntity("");
               setTopic("");
+              setPage(1);
             }}
           >
             清除筛选
@@ -395,9 +441,9 @@ export function ProjectWorkspace({
                   }}
                   className="h-4 w-4"
                   type="checkbox"
-                  aria-label="选择当前筛选结果中的全部任务"
+                  aria-label="选择当前页当前可见的全部任务"
                   checked={allVisibleSelected}
-                  disabled={!filtered.length}
+                  disabled={!pageTasks.length}
                   onChange={(event) =>
                     setSelectedTaskIds(
                       selectVisibleTasks(visibleTaskIds, event.target.checked),
@@ -416,7 +462,7 @@ export function ProjectWorkspace({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {filtered.map((task, index) => (
+            {pageTasks.map((task) => (
               <tr
                 key={task.id}
                 className="cursor-pointer hover:bg-slate-50"
@@ -439,7 +485,9 @@ export function ProjectWorkspace({
                     }
                   />
                 </td>
-                <td className="text-slate-500">{index + 1}</td>
+                <td className="text-slate-500">
+                  {sequenceByTask.get(task.id)}
+                </td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <select
                     aria-label={`${task.entity_name} ${task.topic} 状态`}
@@ -522,6 +570,50 @@ export function ProjectWorkspace({
           </div>
         )}
       </div>
+      {filtered.length > 0 && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-sm">
+          <label className="flex items-center gap-2">
+            每页数量
+            <select
+              className="w-24"
+              value={pageSize}
+              onChange={(event) => {
+                setPageSize(Number(event.target.value) as TaskPageSize);
+                setPage(1);
+              }}
+            >
+              {TASK_PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex items-center gap-3">
+            <button
+              className="btn"
+              disabled={pagination.page <= 1}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+            >
+              上一页
+            </button>
+            <span>
+              第 {pagination.page} / {pagination.totalPages} 页
+            </span>
+            <button
+              className="btn"
+              disabled={pagination.page >= pagination.totalPages}
+              onClick={() =>
+                setPage((current) =>
+                  Math.min(pagination.totalPages, current + 1),
+                )
+              }
+            >
+              下一页
+            </button>
+          </div>
+        </div>
+      )}
       {selectedTask && !editor && (
         <TaskDrawer
           key={selectedTask.id}
@@ -569,6 +661,21 @@ export function ProjectWorkspace({
           tasks={selectedTasks}
           onClose={() => setBatchDeleteOpen(false)}
           onCompleted={handleBatchDeleted}
+        />
+      )}
+      {exportOpen && (
+        <ProjectExportDialog
+          projectId={projectId}
+          projectName={project.name}
+          entityCount={exportCounts.entities}
+          taskCount={exportCounts.tasks}
+          captureCount={exportCounts.captures}
+          onClose={() => setExportOpen(false)}
+          onGenerated={() => {
+            setExportOpen(false);
+            setNoticeTone("success");
+            setNotice("网核成果包已生成并开始下载。");
+          }}
         />
       )}
     </main>

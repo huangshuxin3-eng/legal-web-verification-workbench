@@ -98,3 +98,114 @@ test("print lifecycle detaches after success and print failure", async () => {
   await assert.rejects(printTab(3, controller.signal), /取消/);
   assert.deepEqual(calls, ["attach", "print", "detach"]);
 });
+
+test("Task Picker 可按核查对象、事项和网站名称搜索", async () => {
+  const { taskMatchesSearch } = await loadSourceModule("lib/task-picker.mjs");
+  const task = {
+    entity_name: "北京木锐机器人有限公司",
+    topic: "执行",
+    source_name: "中国执行信息公开网",
+  };
+  assert.equal(taskMatchesSearch(task, "木锐"), true);
+  assert.equal(taskMatchesSearch(task, "执行"), true);
+  assert.equal(taskMatchesSearch(task, "公开网"), true);
+  assert.equal(taskMatchesSearch(task, "商标"), false);
+});
+
+test("当前网站只按完整 hostname 精确匹配，无效 URL 不会抛错", async () => {
+  const { groupTasksForPicker, hostname } = await loadSourceModule(
+    "lib/task-picker.mjs",
+  );
+  const tasks = [
+    {
+      id: "exact",
+      entity_name: "主体 A",
+      topic: "执行",
+      source_name: "执行网",
+      source_url: "https://zxgk.court.gov.cn/path",
+    },
+    {
+      id: "evil",
+      entity_name: "主体 B",
+      topic: "执行",
+      source_name: "相似域名",
+      source_url: "https://zxgk.court.gov.cn.evil.com/",
+    },
+    {
+      id: "invalid",
+      entity_name: "主体 C",
+      topic: "自定义",
+      source_name: "无效网址",
+      source_url: "not a url",
+    },
+  ];
+  assert.equal(hostname("not a url"), null);
+  const grouped = groupTasksForPicker(
+    tasks,
+    "https://zxgk.court.gov.cn/search?q=1",
+  );
+  assert.deepEqual(
+    grouped.matches.map((task) => task.id),
+    ["exact"],
+  );
+  assert.deepEqual(
+    grouped.others.map((task) => task.id),
+    ["evil", "invalid"],
+  );
+});
+
+test("切换标签页会重算推荐组但不会覆盖已选 Task", async () => {
+  const { groupTasksForPicker, validSelectedTaskId } = await loadSourceModule(
+    "lib/task-picker.mjs",
+  );
+  const tasks = [
+    {
+      id: "execution",
+      entity_name: "主体",
+      topic: "执行",
+      source_name: "执行网",
+      source_url: "https://zxgk.court.gov.cn/",
+    },
+    {
+      id: "trademark",
+      entity_name: "主体",
+      topic: "商标",
+      source_name: "商标网",
+      source_url: "https://sbj.cnipa.gov.cn/",
+    },
+  ];
+  assert.deepEqual(
+    groupTasksForPicker(tasks, "https://zxgk.court.gov.cn/").matches.map(
+      (task) => task.id,
+    ),
+    ["execution"],
+  );
+  assert.deepEqual(
+    groupTasksForPicker(tasks, "https://sbj.cnipa.gov.cn/").matches.map(
+      (task) => task.id,
+    ),
+    ["trademark"],
+  );
+  assert.equal(validSelectedTaskId(tasks, "execution"), "execution");
+  assert.equal(validSelectedTaskId(tasks, "missing"), "");
+});
+
+test("Task 变化时先清空旧 Query，再只恢复属于新 Task 的 Query", async () => {
+  const source = await readFile(
+    new URL("../src/sidepanel.mjs", import.meta.url),
+  );
+  const text = source.toString("utf8");
+  const chooseTask = text.slice(
+    text.indexOf("async function chooseTask"),
+    text.indexOf("async function chooseQuery"),
+  );
+  assert.match(chooseTask, /fill\(\$\("query"\), \[\], "加载中…"\)/);
+  assert.match(
+    chooseTask,
+    /queryRows = id \? await data\.queries\(id\) : \[\]/,
+  );
+  assert.match(
+    chooseTask,
+    /restoreQuery && queryRows\.some\(\(q\) => q\.id === restoreQuery\)/,
+  );
+});

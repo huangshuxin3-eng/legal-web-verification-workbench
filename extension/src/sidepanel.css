@@ -44,6 +44,71 @@ label {
   color: #43505c;
   font-size: 12px;
 }
+.task-field {
+  position: relative;
+  margin: 13px 0;
+}
+.task-field > label {
+  margin-bottom: 5px;
+}
+.selected-task {
+  margin-top: 7px;
+  min-height: 18px;
+}
+.task-options {
+  position: absolute;
+  z-index: 20;
+  top: 66px;
+  right: 0;
+  left: 0;
+  max-height: 330px;
+  overflow-y: auto;
+  border: 1px solid #b9c3cc;
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 10px 24px rgb(26 42 58 / 16%);
+}
+.task-group-title {
+  position: sticky;
+  top: 0;
+  margin: 0;
+  padding: 7px 10px;
+  background: #eef3f7;
+  color: #536271;
+  font-size: 11px;
+  font-weight: 700;
+}
+.task-option {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  min-height: auto;
+  border: 0;
+  border-bottom: 1px solid #edf0f2;
+  border-radius: 0;
+  padding: 9px 10px;
+  text-align: left;
+}
+.task-option:hover,
+.task-option:focus-visible,
+.task-option[aria-selected="true"] {
+  background: #edf6ff;
+  outline: none;
+}
+.task-option-entity {
+  color: #17202a;
+  font-weight: 650;
+}
+.task-option-meta {
+  color: #5f6c78;
+  font-size: 12px;
+}
+.task-empty {
+  margin: 0;
+  padding: 14px 10px;
+  color: #687683;
+  font-size: 12px;
+}
 input,
 select,
 button {

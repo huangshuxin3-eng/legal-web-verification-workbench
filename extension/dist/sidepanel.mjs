@@ -1,5 +1,9 @@
 import { session, signIn, signOut } from "./lib/auth.mjs";
 import * as data from "./lib/data.mjs";
+import {
+  groupTasksForPicker,
+  validSelectedTaskId,
+} from "./lib/task-picker.mjs";
 
 const $ = (id) => document.getElementById(id);
 let projectRows = [],
@@ -24,6 +28,7 @@ async function currentTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeTab = tab;
   $("current-url").textContent = tab?.url || "当前页面 URL 不可读取";
+  renderTaskPicker();
   updateButton();
 }
 function updateButton() {
@@ -40,22 +45,89 @@ async function loadProjects() {
   );
 }
 async function chooseProject(id, restoreTask) {
-  fill($("task"), [], "加载中…");
-  $("task").disabled = true;
+  $("task").value = "";
+  $("task-search").value = "";
+  $("task-search").disabled = true;
+  $("selected-task").textContent = "正在加载 Task…";
+  $("task-site").textContent = "";
+  $("no-query").hidden = true;
+  $("count").textContent = "—";
+  closeTaskPicker();
   fill($("query"), [], "请选择 Query");
   $("query").disabled = true;
   taskRows = id ? await data.tasks(id) : [];
-  fill(
-    $("task"),
-    taskRows.map((t) =>
-      option(t.id, `${t.entity_name} · ${t.topic} · ${t.source_name}`),
-    ),
-    taskRows.length ? "请选择 Task" : "项目中没有 Task",
+  $("task-search").disabled = !id || !taskRows.length;
+  $("task").value = validSelectedTaskId(taskRows, restoreTask);
+  renderTaskPicker();
+  if ($("task").value) {
+    await chooseTask($("task").value);
+  } else {
+    updateButton();
+  }
+}
+function closeTaskPicker() {
+  $("task-options").hidden = true;
+  $("task-search").setAttribute("aria-expanded", "false");
+}
+function openTaskPicker() {
+  if ($("task-search").disabled) return;
+  $("task-options").hidden = false;
+  $("task-search").setAttribute("aria-expanded", "true");
+}
+function taskOption(task) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "task-option";
+  button.setAttribute("role", "option");
+  button.setAttribute("aria-selected", String($("task").value === task.id));
+  const entity = document.createElement("span");
+  entity.className = "task-option-entity";
+  entity.textContent = task.entity_name;
+  const meta = document.createElement("span");
+  meta.className = "task-option-meta";
+  meta.textContent = `${task.topic} · ${task.source_name}`;
+  button.replaceChildren(entity, meta);
+  button.onclick = async () => {
+    $("task").value = task.id;
+    $("task-search").value = "";
+    closeTaskPicker();
+    renderTaskPicker();
+    try {
+      await chooseTask(task.id);
+    } catch (error) {
+      setError(error.message);
+    }
+  };
+  return button;
+}
+function appendTaskGroup(container, title, tasks) {
+  if (!tasks.length) return;
+  const heading = document.createElement("p");
+  heading.className = "task-group-title";
+  heading.textContent = title;
+  container.append(heading, ...tasks.map(taskOption));
+}
+function renderTaskPicker() {
+  const selectedTask = taskRows.find((task) => task.id === $("task").value);
+  $("selected-task").textContent = selectedTask
+    ? `${selectedTask.entity_name} · ${selectedTask.topic} · ${selectedTask.source_name}`
+    : taskRows.length
+      ? "请选择 Task"
+      : "项目中没有 Task";
+  const groups = groupTasksForPicker(
+    taskRows,
+    activeTab?.url,
+    $("task-search").value,
   );
-  $("task").disabled = !id || !taskRows.length;
-  if (restoreTask && taskRows.some((t) => t.id === restoreTask)) {
-    $("task").value = restoreTask;
-    await chooseTask(restoreTask);
+  const container = $("task-options");
+  container.replaceChildren();
+  appendTaskGroup(container, "当前网站匹配", groups.matches);
+  appendTaskGroup(container, "全部 Task", groups.others);
+  if (!groups.matches.length && !groups.others.length) {
+    const empty = document.createElement("p");
+    empty.className = "task-empty";
+    empty.textContent = "没有匹配的 Task";
+    container.append(empty);
   }
 }
 async function chooseTask(id, restoreQuery) {
@@ -133,8 +205,23 @@ $("refresh-url").onclick = () =>
   currentTab().catch((error) => setError(error.message));
 $("project").onchange = () =>
   chooseProject($("project").value).catch((error) => setError(error.message));
-$("task").onchange = () =>
-  chooseTask($("task").value).catch((error) => setError(error.message));
+$("task-search").onfocus = openTaskPicker;
+$("task-search").onclick = openTaskPicker;
+$("task-search").oninput = () => {
+  renderTaskPicker();
+  openTaskPicker();
+};
+$("task-search").onkeydown = (event) => {
+  if (event.key === "Escape") closeTaskPicker();
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    openTaskPicker();
+    $("task-options").querySelector(".task-option")?.focus();
+  }
+};
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".task-field")) closeTaskPicker();
+});
 $("query").onchange = () =>
   chooseQuery($("query").value).catch((error) => setError(error.message));
 $("cancel").onclick = () => chrome.runtime.sendMessage({ type: "cancel" });

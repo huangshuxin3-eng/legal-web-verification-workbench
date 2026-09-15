@@ -2,14 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-test("Task 列表展示连续序号和查看、编辑、删除操作", async () => {
+test("Task 列表展示完整项目稳定序号和查看、编辑、删除操作", async () => {
   const source = await readFile(
     new URL("../src/components/project-workspace.tsx", import.meta.url),
     "utf8",
   );
   assert.match(source, /<th[^>]*>序号<\/th>/);
-  assert.match(source, /filtered\.map\(\(task, index\)/);
-  assert.match(source, /\{index \+ 1\}/);
+  assert.match(source, /pageTasks\.map\(\(task\)/);
+  assert.match(source, /sequenceByTask\.get\(task\.id\)/);
   for (const action of ["查看", "编辑", "删除"])
     assert.match(source, new RegExp(`>\\s*${action}\\s*<\\/button>`));
 });
@@ -45,17 +45,30 @@ test("确认删除只移除目标 Task，并保留 Drawer 的共用删除入口"
   assert.match(drawer, /<TaskDeleteDialog/);
 });
 
-test("Task 表保留序号并提供当前结果全选和批量确认框", async () => {
+test("Task 表保留序号并仅提供当前页全选和批量确认框", async () => {
   const source = await readFile(
     new URL("../src/components/project-workspace.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /aria-label="选择当前筛选结果中的全部任务"/);
+  assert.match(source, /aria-label="选择当前页当前可见的全部任务"/);
   assert.match(source, /selectVisibleTasks\(visibleTaskIds/);
   assert.match(source, /已选择 \{selectedTasks\.length\} 个任务/);
   assert.match(source, />\s*批量删除\s*<\/button>/);
   assert.match(source, /<TaskBatchDeleteDialog/);
   assert.match(source, /<th[^>]*>序号<\/th>/);
+});
+
+test("Task 表提供 25/50/100 分页并展示当前范围", async () => {
+  const source = await readFile(
+    new URL("../src/components/project-workspace.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /TASK_PAGE_SIZES/);
+  assert.match(source, /每页数量/);
+  assert.match(source, />\s*上一页\s*</);
+  assert.match(source, />\s*下一页\s*</);
+  assert.match(source, /pagination\.start/);
+  assert.match(source, /pagination\.end/);
 });
 
 test("批量确认框取消不请求删除并展示聚合统计", async () => {
