@@ -27,6 +27,149 @@ const FIRST_PAGE_NO = 1;
 export const AUTOMATION_QUERY_UNAVAILABLE_MESSAGE =
   "本次核查关联的 Query 已不存在或无法访问，无法安全继续本次核查。已生成 Capture 不删除。";
 
+export const AUTOMATION_JOB_INVALID_MESSAGE =
+  "本次核查的恢复状态不完整或不一致，无法安全继续。已生成留痕不会删除。";
+
+const operationTypes = new Set(["LIST", "DETAIL"]);
+const operationPhases = new Set(Object.values(AUTOMATION_PHASES));
+
+const invalidJob = (code, reason) => ({ ok: false, code, reason });
+
+/**
+ * 校验持久化 zxgk automationJob 中明显不可能或自相矛盾的组合。
+ * 该函数只读且不修复 snapshot，并保留 LIST/DETAIL 的 captureId 恢复窗口。
+ */
+export function validateZxgkAutomationJobInvariant(job) {
+  if (!job || typeof job !== "object")
+    return invalidJob("JOB_MISSING", "automationJob 不存在或格式无效。");
+  if (!String(job.taskId || "").trim())
+    return invalidJob("TASK_ID_MISSING", "automationJob 缺少 taskId。");
+  if (!String(job.queryText || "").trim())
+    return invalidJob("QUERY_TEXT_MISSING", "automationJob 缺少 queryText。");
+
+  const keysPresent = Array.isArray(job.pageOneRowKeys);
+  const keys = keysPresent ? job.pageOneRowKeys : [];
+  if (job.pageOneRowKeys != null && !keysPresent)
+    return invalidJob("ROW_KEYS_INVALID", "pageOneRowKeys 必须是数组或空值。");
+  if (keys.some((key) => !String(key || "").trim()))
+    return invalidJob("ROW_KEY_EMPTY", "pageOneRowKeys 包含空值。");
+  if (new Set(keys).size !== keys.length)
+    return invalidJob("ROW_KEYS_DUPLICATE", "pageOneRowKeys 包含重复结果。");
+
+  if (job.pageOneRows != null) {
+    if (!Array.isArray(job.pageOneRows))
+      return invalidJob("ROWS_INVALID", "pageOneRows 必须是数组或空值。");
+    if (!keysPresent || job.pageOneRows.length !== keys.length)
+      return invalidJob("ROWS_KEYS_LENGTH_MISMATCH", "冻结结果与 rowKey 数量不一致。");
+    const derived = job.pageOneRows.map(buildRowKey);
+    if (derived.some((key, index) => key !== keys[index]))
+      return invalidJob("ROWS_KEYS_ORDER_MISMATCH", "冻结结果与 rowKey 顺序不一致。");
+  }
+
+  if (job.expectedDetailCount != null) {
+    if (!Number.isInteger(job.expectedDetailCount) || job.expectedDetailCount < 0)
+      return invalidJob("EXPECTED_COUNT_INVALID", "expectedDetailCount 必须是非负整数。");
+    if (keysPresent && job.expectedDetailCount !== keys.length)
+      return invalidJob("EXPECTED_COUNT_MISMATCH", "expectedDetailCount 与冻结结果数不一致。");
+  }
+
+  const completed = job.completedDetailKeys ?? [];
+  if (!Array.isArray(completed))
+    return invalidJob("COMPLETED_KEYS_INVALID", "completedDetailKeys 必须是数组。");
+  if (new Set(completed).size !== completed.length)
+    return invalidJob("COMPLETED_KEYS_DUPLICATE", "completedDetailKeys 包含重复结果。");
+  if (completed.length && !keysPresent)
+    return invalidJob("COMPLETED_WITHOUT_FROZEN_SET", "尚未冻结结果集却已有详情完成进度。");
+  if (completed.some((key) => !keys.includes(key)))
+    return invalidJob("COMPLETED_KEY_UNKNOWN", "详情完成进度包含冻结结果集之外的 rowKey。");
+  if (job.expectedDetailCount != null && completed.length > job.expectedDetailCount)
+    return invalidJob("COMPLETED_COUNT_OVERFLOW", "详情完成数超过 expectedDetailCount。");
+
+  const detailCaptures = job.detailCaptures ?? [];
+  if (!Array.isArray(detailCaptures))
+    return invalidJob("DETAIL_CAPTURES_INVALID", "detailCaptures 必须是数组。");
+  if (
+    detailCaptures.some(
+      (item) => item?.rowKey && (!keysPresent || !keys.includes(item.rowKey)),
+    )
+  )
+    return invalidJob("DETAIL_CAPTURE_KEY_UNKNOWN", "详情留痕包含冻结结果集之外的 rowKey。");
+
+  const hasProgress =
+    keys.length > 0 ||
+    completed.length > 0 ||
+    detailCaptures.length > 0 ||
+    Boolean(job.listCapture) ||
+    Boolean(job.currentOperation?.captureId) ||
+    Boolean(job.firstPageComplete);
+  if (hasProgress && !String(job.queryId || "").trim())
+    return invalidJob("QUERY_ID_MISSING", "已有第一页进度但缺少 queryId。");
+
+  if (
+    job.listCapture?.query_id &&
+    job.queryId &&
+    job.listCapture.query_id !== job.queryId
+  )
+    return invalidJob("LIST_CAPTURE_QUERY_MISMATCH", "列表留痕不属于 automationJob.queryId。");
+
+  const operation = job.currentOperation;
+  if (operation != null) {
+    if (!operationTypes.has(operation.type))
+      return invalidJob("OPERATION_TYPE_INVALID", "currentOperation.type 无效。");
+    if (!operationPhases.has(operation.phase))
+      return invalidJob("OPERATION_PHASE_INVALID", "currentOperation.phase 无效。");
+    if (operation.pageNo !== FIRST_PAGE_NO)
+      return invalidJob("OPERATION_PAGE_INVALID", "M8.2a currentOperation.pageNo 必须为 1。");
+    if (operation.type === "LIST") {
+      if (
+        operation.rowKey != null ||
+        operation.caseNo != null ||
+        operation.detailTabId != null
+      )
+        return invalidJob("LIST_OPERATION_HAS_DETAIL_FIELDS", "LIST operation 携带了详情专用字段。");
+      if (
+        operation.capture?.query_id &&
+        job.queryId &&
+        operation.capture.query_id !== job.queryId
+      )
+        return invalidJob("LIST_PENDING_QUERY_MISMATCH", "待收尾列表留痕不属于 automationJob.queryId。");
+    } else {
+      if (!String(operation.rowKey || "").trim())
+        return invalidJob("DETAIL_OPERATION_KEY_MISSING", "DETAIL operation 缺少 rowKey。");
+      if (!keysPresent || !keys.includes(operation.rowKey))
+        return invalidJob("DETAIL_OPERATION_KEY_UNKNOWN", "DETAIL operation.rowKey 不属于冻结结果集。");
+      if (Array.isArray(job.pageOneRows)) {
+        const index = keys.indexOf(operation.rowKey);
+        const expectedCaseNo = job.pageOneRows[index]?.caseNo;
+        if (
+          expectedCaseNo &&
+          operation.caseNo &&
+          String(expectedCaseNo) !== String(operation.caseNo)
+        )
+          return invalidJob("DETAIL_OPERATION_CASE_MISMATCH", "DETAIL operation.caseNo 与冻结结果冲突。");
+      }
+    }
+  }
+
+  const complete = Boolean(job.firstPageComplete);
+  if (job.state === AUTOMATION_STATES.FIRST_PAGE_COMPLETE && !complete)
+    return invalidJob("COMPLETE_MARKER_MISSING", "FIRST_PAGE_COMPLETE 缺少完成摘要。");
+  if (complete && job.state !== AUTOMATION_STATES.FIRST_PAGE_COMPLETE)
+    return invalidJob("COMPLETE_STATE_MISMATCH", "完成摘要与 automation state 不一致。");
+  if (complete) {
+    if (!job.listCapture)
+      return invalidJob("COMPLETE_LIST_CAPTURE_MISSING", "第一页完成但列表留痕尚未稳定收尾。");
+    if (!keysPresent || job.expectedDetailCount == null)
+      return invalidJob("COMPLETE_FROZEN_SET_MISSING", "第一页完成但缺少冻结结果集。");
+    if (completed.length !== job.expectedDetailCount)
+      return invalidJob("COMPLETE_DETAILS_MISSING", "第一页完成标记与详情完成数不一致。");
+    if (operation)
+      return invalidJob("COMPLETE_OPERATION_ACTIVE", "第一页完成时仍存在未结算操作。");
+  }
+
+  return { ok: true };
+}
+
 function messageOf(error) {
   return String(error?.message || error || "自动核查失败。");
 }
@@ -187,6 +330,9 @@ export function createZxgkAutomation(dependencies) {
     if (!job || job.adapter !== ZXGK_EXECUTION_ADAPTER)
       throw new Error("没有可继续的自动核查任务。");
     try {
+      const invariant = validateZxgkAutomationJobInvariant(job);
+      if (!invariant.ok)
+        throw new Error(`${AUTOMATION_JOB_INVALID_MESSAGE}（${invariant.code}）`);
       if (!canResumeFirstPage(job))
         throw new Error("当前没有可继续的第一页核查进度，请重新开始自动核查。");
       if (taskId !== job.taskId)
@@ -542,6 +688,9 @@ export function createZxgkAutomation(dependencies) {
     if (!job || job.adapter !== ZXGK_EXECUTION_ADAPTER)
       throw new Error("没有可继续的自动核查任务。");
     try {
+      const invariant = validateZxgkAutomationJobInvariant(job);
+      if (!invariant.ok)
+        throw new Error(`${AUTOMATION_JOB_INVALID_MESSAGE}（${invariant.code}）`);
       if (!canRecheckAutomation(job))
         throw new Error("当前自动核查状态不能继续检查结果。");
       if (taskId !== job.taskId)

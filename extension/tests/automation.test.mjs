@@ -259,6 +259,10 @@ async function harness(result, options = {}) {
     get job() {
       return job;
     },
+    replaceJob(next) {
+      job = next;
+      return job;
+    },
     /** 模拟原自动化标签页被用户/浏览器关闭。 */
     closeListTab() {
       for (const id of listTabIds) closedTabIds.add(id);
@@ -1409,6 +1413,219 @@ const tenRowPage = Array.from({ length: 10 }, (_, index) =>
   ),
 );
 
+function invariantJob(state, adapter, patch = {}) {
+  const keys = tenRowPage.map(adapter.buildRowKey);
+  return {
+    adapter: adapter.ZXGK_EXECUTION_ADAPTER,
+    state: state.AUTOMATION_STATES.READING_RESULT_ROWS,
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+    queryText: executionTask.entity_name,
+    queryId: "query-7",
+    result: state.AUTOMATION_RESULT.HAS_RESULT,
+    expectedDetailCount: keys.length,
+    pageOneRowKeys: keys,
+    completedDetailKeys: [],
+    detailCaptures: [],
+    listCapture: {
+      id: "capture-list",
+      query_id: "query-7",
+      capture_no: 3,
+    },
+    currentOperation: null,
+    firstPageComplete: null,
+    ...patch,
+  };
+}
+
+test("runtime job invariant 接受合法早期状态与第一页进度", async () => {
+  const { state, adapter, workflow } = await modules();
+  const validate = workflow.validateZxgkAutomationJobInvariant;
+  assert.deepEqual(
+    validate({
+      adapter: adapter.ZXGK_EXECUTION_ADAPTER,
+      state: state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
+      taskId: executionTask.id,
+      projectId: executionTask.project_id,
+      queryText: executionTask.entity_name,
+      queryId: null,
+    }),
+    { ok: true },
+  );
+
+  const base = invariantJob(state, adapter);
+  assert.deepEqual(validate(base), { ok: true });
+  const keys = base.pageOneRowKeys;
+  assert.deepEqual(
+    validate({
+      ...base,
+      completedDetailKeys: keys.slice(0, 3),
+      detailCaptures: keys.slice(0, 3).map((rowKey, index) => ({
+        rowKey,
+        captureId: `capture-${index + 4}`,
+      })),
+    }),
+    { ok: true },
+  );
+});
+
+test("runtime job invariant 保留 DETAIL 与 LIST 的合法 Capture recovery window", async () => {
+  const { state, adapter, workflow } = await modules();
+  const validate = workflow.validateZxgkAutomationJobInvariant;
+  const base = invariantJob(state, adapter, { listCapture: null });
+  const [rowKey] = base.pageOneRowKeys;
+  const caseNo = tenRowPage[0].caseNo;
+
+  assert.deepEqual(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.CAPTURING_DETAIL,
+      currentOperation: {
+        type: "DETAIL",
+        pageNo: 1,
+        rowKey,
+        caseNo,
+        phase: state.AUTOMATION_PHASES.CAPTURING,
+        detailTabId: 901,
+      },
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.RETURNING_TO_LIST,
+      detailCaptures: [{ rowKey, captureId: "capture-4" }],
+      currentOperation: {
+        type: "DETAIL",
+        pageNo: 1,
+        rowKey,
+        caseNo,
+        phase: state.AUTOMATION_PHASES.RETURNING,
+        detailTabId: 901,
+        captureId: "capture-4",
+      },
+    }),
+    { ok: true },
+  );
+  assert.deepEqual(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.CAPTURING_LIST_PAGE,
+      currentOperation: {
+        type: "LIST",
+        pageNo: 1,
+        rowKey: null,
+        caseNo: null,
+        phase: state.AUTOMATION_PHASES.CAPTURING,
+        captureId: "capture-list",
+        capture: {
+          id: "capture-list",
+          query_id: "query-7",
+          capture_no: 3,
+        },
+      },
+    }),
+    { ok: true },
+  );
+});
+
+test("runtime job invariant 拒绝冻结集合与详情进度矛盾", async () => {
+  const { state, adapter, workflow } = await modules();
+  const validate = workflow.validateZxgkAutomationJobInvariant;
+  const base = invariantJob(state, adapter);
+  const duplicateKeys = [...base.pageOneRowKeys];
+  duplicateKeys[1] = duplicateKeys[0];
+
+  assert.equal(
+    validate({ ...base, pageOneRowKeys: duplicateKeys }).code,
+    "ROW_KEYS_DUPLICATE",
+  );
+  assert.equal(
+    validate({ ...base, completedDetailKeys: ["unknown-row"] }).code,
+    "COMPLETED_KEY_UNKNOWN",
+  );
+  assert.equal(
+    validate({ ...base, expectedDetailCount: 9 }).code,
+    "EXPECTED_COUNT_MISMATCH",
+  );
+  assert.equal(
+    validate({
+      ...base,
+      listCapture: { ...base.listCapture, query_id: "query-other" },
+    }).code,
+    "LIST_CAPTURE_QUERY_MISMATCH",
+  );
+  assert.equal(
+    validate({
+      ...base,
+      currentOperation: {
+        type: "DETAIL",
+        pageNo: 1,
+        rowKey: "unknown-row",
+        caseNo: "（2026）错误案号",
+        phase: state.AUTOMATION_PHASES.CAPTURING,
+      },
+    }).code,
+    "DETAIL_OPERATION_KEY_UNKNOWN",
+  );
+});
+
+test("runtime job invariant 严格校验 FIRST_PAGE_COMPLETE", async () => {
+  const { state, adapter, workflow } = await modules();
+  const validate = workflow.validateZxgkAutomationJobInvariant;
+  const base = invariantJob(state, adapter);
+  const summary = { pageNo: 1, detailCount: 10, newCaptures: 11 };
+
+  assert.equal(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE,
+      firstPageComplete: summary,
+      completedDetailKeys: base.pageOneRowKeys.slice(0, 9),
+    }).code,
+    "COMPLETE_DETAILS_MISSING",
+  );
+  assert.equal(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE,
+      firstPageComplete: summary,
+      completedDetailKeys: base.pageOneRowKeys,
+      currentOperation: {
+        type: "LIST",
+        pageNo: 1,
+        rowKey: null,
+        caseNo: null,
+        phase: state.AUTOMATION_PHASES.VERIFYING,
+      },
+    }).code,
+    "COMPLETE_OPERATION_ACTIVE",
+  );
+  assert.equal(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE,
+      firstPageComplete: null,
+      completedDetailKeys: base.pageOneRowKeys,
+    }).code,
+    "COMPLETE_MARKER_MISSING",
+  );
+  assert.equal(
+    validate({ ...base, firstPageComplete: summary }).code,
+    "COMPLETE_STATE_MISMATCH",
+  );
+  assert.deepEqual(
+    validate({
+      ...base,
+      state: state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE,
+      firstPageComplete: summary,
+      completedDetailKeys: base.pageOneRowKeys,
+    }),
+    { ok: true },
+  );
+});
+
 /** 跑到指定条失败，返回同一个 run（同一个 automationJob）。 */
 async function failOnDetail(options) {
   const run = await runFirstPage({ rows: tenRowPage, ...options });
@@ -1417,6 +1634,33 @@ async function failOnDetail(options) {
   );
   return run;
 }
+
+test("resume 遇到非法持久化 job 时在任何外部动作前 fail closed", async () => {
+  const { state } = await modules();
+  const run = await failOnDetail({
+    archiveFailure: ({ kind, detailIndex }) =>
+      kind === "detail" && detailIndex === 2,
+  });
+  const duplicateKeys = [...run.job.pageOneRowKeys];
+  duplicateKeys[1] = duplicateKeys[0];
+  run.replaceJob({ ...run.job, pageOneRowKeys: duplicateKeys });
+  const callsBefore = run.calls.length;
+  const queryCreatesBefore = named(run, "create-query").length;
+  const archivesBefore = named(run, "archive-existing-m4").length;
+  const detailOpensBefore = named(run, "open-detail").length;
+
+  await assert.rejects(
+    run.automation.resume({ taskId: executionTask.id }),
+    /恢复状态不完整或不一致.*ROW_KEYS_DUPLICATE/,
+  );
+
+  assert.equal(run.job.state, state.AUTOMATION_STATES.FAILED);
+  assert.match(run.job.error, /已生成留痕不会删除/);
+  assert.equal(run.calls.length, callsBefore);
+  assert.equal(named(run, "create-query").length, queryCreatesBefore);
+  assert.equal(named(run, "archive-existing-m4").length, archivesBefore);
+  assert.equal(named(run, "open-detail").length, detailOpensBefore);
+});
 
 test("详情处理到第 6 条失败后，继续本次核查从第 6 条开始", async () => {
   const { state, adapter } = await modules();
