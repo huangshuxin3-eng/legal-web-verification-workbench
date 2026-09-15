@@ -2,6 +2,7 @@ import { CONFIG } from "./config.mjs";
 import { authorizedFetch } from "./lib/auth.mjs";
 import * as data from "./lib/data.mjs";
 import { businessName } from "./lib/names.mjs";
+import { createArchiveBridge } from "./lib/archive-bridge.mjs";
 import { printTab } from "./lib/print.mjs";
 import { evaluateInTab } from "./lib/debugger-evaluate.mjs";
 import {
@@ -82,6 +83,12 @@ async function uploadPdf(queryId, sourceUrl, requestId, blob) {
   }
   return body;
 }
+const archiveBridge = createArchiveBridge({
+  queryContext: data.queryContext,
+  queryNotAccessibleCode: data.QUERY_NOT_ACCESSIBLE,
+  uploadCapture: uploadPdf,
+  captureName: businessName,
+});
 /**
  * Query 读不到时的文案按上下文区分。手工上下文由用户自己重新选择；
  * 自动核查上下文只能停下来交人工，绝不新建或静默切换 Query。
@@ -105,13 +112,10 @@ async function archive(queryId, requestedTabId, context = "manual") {
       previous.requestId
     )
       requestId = previous.requestId;
-    let queryRow;
-    try {
-      queryRow = await data.queryContext(queryId);
-    } catch (error) {
-      if (error?.code !== data.QUERY_NOT_ACCESSIBLE) throw error;
-      throw new Error(queryUnavailableMessage[context] || error.message);
-    }
+    const queryRow = await archiveBridge.loadContext(
+      queryId,
+      queryUnavailableMessage[context],
+    );
     const tab = requestedTabId
       ? await chrome.tabs.get(requestedTabId).catch(() => null)
       : (
@@ -163,18 +167,14 @@ async function archive(queryId, requestedTabId, context = "manual") {
       printedAt: printed.printedAt,
       bytes: bytes.length,
     });
-    const capture = await uploadPdf(
+    const archived = await archiveBridge.upload({
       queryId,
-      frozen.sourceUrl,
+      queryRow,
+      sourceUrl: frozen.sourceUrl,
       requestId,
-      new Blob([bytes], { type: "application/pdf" }),
-    );
-    const filename = businessName(
-      queryRow.tasks,
-      queryRow.query_no,
-      capture.capture_no,
-      capture.created_at,
-    );
+      blob: new Blob([bytes], { type: "application/pdf" }),
+    });
+    const { capture, filename } = archived;
     await saveJob({
       status: "success",
       stage: "done",

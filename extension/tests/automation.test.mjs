@@ -2455,13 +2455,14 @@ test("手工 Query 已失效不影响自动核查：resume 只认 automationJob.
 });
 
 test("手工 Query 的错误文案与自动核查文案彻底分开", async () => {
-  const [data, worker, workflow] = await Promise.all([
+  const [data, worker, workflow, archiveBridge] = await Promise.all([
     readFile(new URL("../src/lib/data.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/worker.mjs", import.meta.url), "utf8"),
     readFile(
       new URL("../src/lib/zxgk-automation.mjs", import.meta.url),
       "utf8",
     ),
+    readFile(new URL("../src/lib/archive-bridge.mjs", import.meta.url), "utf8"),
   ]);
   // 数据层只给上下文无关的标记，不再自带“手工”或“自动”的口径。
   assert.doesNotMatch(data, /Query 已删除或无权访问，请重新选择。/);
@@ -2481,9 +2482,10 @@ test("手工 Query 的错误文案与自动核查文案彻底分开", async () =
   assert.match(workflow, /export const AUTOMATION_QUERY_UNAVAILABLE_MESSAGE =/);
   assert.match(workflow, /已生成 Capture 不删除/);
   // Query 失效不等于网络/登录错误：只重写“读不到 Query”这一类。
+  assert.match(worker, /queryNotAccessibleCode: data\.QUERY_NOT_ACCESSIBLE/);
   assert.match(
-    worker,
-    /if \(error\?\.code !== data\.QUERY_NOT_ACCESSIBLE\) throw error;/,
+    archiveBridge,
+    /if \(error\?\.code !== queryNotAccessibleCode\) throw error;/,
   );
 });
 
