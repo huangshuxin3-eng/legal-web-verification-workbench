@@ -4,18 +4,13 @@ import {
   groupTasksForPicker,
   validSelectedTaskId,
 } from "./lib/task-picker.mjs";
-import {
-  caseNoFromRowKey,
-  supportsZxgkExecution,
-} from "./adapters/zxgk-execution.mjs";
+import { supportsZxgkExecution } from "./adapters/zxgk-execution.mjs";
 import {
   AUTOMATION_STATES,
-  canRecheckAutomation,
-  canResumeFirstPage,
   canStartNewAutomation,
-  hasListCapture,
   isAutomationRunning,
 } from "./lib/automation-state.mjs";
+import { deriveZxgkAutomationProgressViewModel } from "./lib/automation-progress-view.mjs";
 
 const $ = (id) => document.getElementById(id);
 let projectRows = [],
@@ -209,42 +204,28 @@ const automationLabels = {
   [AUTOMATION_STATES.FAILED]: "自动核查失败",
   [AUTOMATION_STATES.DONE]: "查询与留痕已完成",
 };
-/** M8.2a 第一页循环中的状态，用于显示进度而不是最终结论。 */
-const firstPageStates = [
-  AUTOMATION_STATES.CAPTURING_LIST_PAGE,
-  AUTOMATION_STATES.READING_RESULT_ROWS,
-  AUTOMATION_STATES.OPENING_DETAIL,
-  AUTOMATION_STATES.CAPTURING_DETAIL,
-  AUTOMATION_STATES.RETURNING_TO_LIST,
-  AUTOMATION_STATES.VERIFYING_LIST_STATE,
-];
-
 /**
  * 未完成的第一页核查：显示真实进度，并把「继续本次核查」作为主要动作。
  * 继续沿用同一个 Query 与同一份已完成留痕，不会从第 1 条重新开始。
  */
-function firstPageProgressLines(job) {
-  const done = job.completedDetailKeys || [];
-  const expected = job.expectedDetailCount ?? 0;
-  const next = (job.pageOneRowKeys || []).find((key) => !done.includes(key));
-  const caseNo = next ? caseNoFromRowKey(next) : "";
-  // Capture 已经 finalize 成功但尚未收尾时也算已留痕，不谎报“待留痕”。
-  const listDone = hasListCapture(job);
+function firstPageProgressLines(view) {
   const lines = [
     "本次核查未完成",
-    listDone ? "✓ 第 1 页列表：已留痕" : "◦ 第 1 页列表：待留痕",
-    `详情：${done.length} / ${expected}`,
-    `已生成留痕：${(listDone ? 1 : 0) + done.length}`,
+    view.listCaptureComplete
+      ? "✓ 第 1 页列表：已留痕"
+      : "◦ 第 1 页列表：待留痕",
+    `详情：${view.completedDetailCount} / ${view.expectedDetailCount}`,
+    `已生成留痕：${view.generatedCaptureCount}`,
   ];
-  if (caseNo) lines.push(`下一项：${caseNo}`);
+  if (view.nextIncompleteCaseNo)
+    lines.push(`下一项：${view.nextIncompleteCaseNo}`);
   lines.push("继续本次核查将从下一个未完成项开始，不会重复已完成的留痕。");
   return lines;
 }
 function renderAutomation() {
   const task = taskRows.find((row) => row.id === $("task").value);
   const canStart =
-    supportsZxgkExecution(task) &&
-    canStartNewAutomation(automationJob);
+    supportsZxgkExecution(task) && canStartNewAutomation(automationJob);
   $("automation-ready").hidden = !canStart;
   $("automation-ready-entity").textContent = task?.entity_name || "";
   $("automation-ready-query").textContent = task?.entity_name || "";
@@ -260,17 +241,17 @@ function renderAutomation() {
     updateButton();
     return;
   }
-  const resumable = canResumeFirstPage(automationJob);
+  const progress = deriveZxgkAutomationProgressViewModel(automationJob);
+  const resumable = progress.canResume;
   $("automation-entity").textContent = automationJob.entityName || "";
   $("automation-query-text").textContent = automationJob.queryText || "";
   $("automation-scope").textContent =
     `${automationJob.topic || "执行"} · ${automationJob.sourceName || "中国执行信息公开网"}`;
   $("automation-status").textContent =
     automationLabels[automationJob.state] || automationJob.state;
-  const waiting =
-    automationJob.state === AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION;
+  const waiting = progress.waitingForHumanVerification;
   $("automation-verification").hidden = !waiting;
-  const canContinue = canRecheckAutomation(automationJob);
+  const canContinue = progress.canContinue;
   $("automation-continue").hidden = !canContinue;
   $("automation-continue").disabled =
     automationBusy || $("task").value !== automationJob.taskId;
@@ -284,7 +265,7 @@ function renderAutomation() {
     automationBusy || $("task").value !== automationJob.taskId;
   $("automation-resume-block").hidden = !resumable;
   $("automation-resume-block").textContent = resumable
-    ? firstPageProgressLines(automationJob).join("\n")
+    ? firstPageProgressLines(progress).join("\n")
     : "";
   $("automation-dismiss").hidden = false;
   $("automation-dismiss").disabled = automationBusy;
@@ -300,29 +281,29 @@ function renderAutomation() {
       `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
       `留痕：${automationJob.filename || "已归档"}`,
     );
-  } else if (automationJob.state === AUTOMATION_STATES.FIRST_PAGE_COMPLETE) {
-    const completed = automationJob.completedDetailKeys?.length ?? 0;
-    const expected = automationJob.expectedDetailCount ?? 0;
+  } else if (progress.firstPageComplete) {
     lines.push(
       "第 1 页已完整处理",
       "✓ 结果列表：1 / 1",
-      `✓ 详情：${completed} / ${expected}`,
-      `✓ 本页新增留痕：${completed + 1}`,
+      `✓ 详情：${progress.completedDetailCount} / ${progress.expectedDetailCount}`,
+      `✓ 本页新增留痕：${progress.completedDetailCount + 1}`,
     );
-    const totalPages = automationJob.resultPage?.totalPages;
+    const totalPages = progress.totalPages;
     if (totalPages)
       lines.push("当前已自动处理：第 1 页", `网站结果页：共 ${totalPages} 页`);
     lines.push("后续分页暂未自动执行。请人工继续核查。");
-  } else if (firstPageStates.includes(automationJob.state)) {
-    const operation = automationJob.currentOperation || {};
-    const completed = automationJob.completedDetailKeys?.length ?? 0;
-    const expected = automationJob.expectedDetailCount ?? 0;
-    const listDone = hasListCapture(automationJob);
+  } else if (progress.firstPageProcessing) {
     lines.push("正在处理第 1 页");
-    lines.push(listDone ? "✓ 列表留痕已完成" : "◦ 列表留痕待完成");
-    if (expected) lines.push(`详情：${completed} / ${expected}`);
-    if (operation.caseNo) lines.push(`当前处理：${operation.caseNo}`);
-    lines.push(`累计新增留痕：${(listDone ? 1 : 0) + completed}`);
+    lines.push(
+      progress.listCaptureComplete ? "✓ 列表留痕已完成" : "◦ 列表留痕待完成",
+    );
+    if (progress.expectedDetailCount)
+      lines.push(
+        `详情：${progress.completedDetailCount} / ${progress.expectedDetailCount}`,
+      );
+    if (progress.pendingOperationCaseNo)
+      lines.push(`当前处理：${progress.pendingOperationCaseNo}`);
+    lines.push(`累计新增留痕：${progress.generatedCaptureCount}`);
   } else if (automationJob.state === AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED) {
     lines.push(
       "已发现查询结果",
@@ -341,16 +322,6 @@ function renderAutomation() {
   updateButton();
 }
 
-/**
- * 自动核查自身的失败已经显示在自动核查卡片里（automationJob.error）。
- * 这类错误不再占用页面底部的错误行，避免与手工 Query 的错误混在一起。
- */
-function automationErrorShownInCard(job) {
-  return (
-    [AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(job?.state) &&
-    Boolean(job?.error)
-  );
-}
 async function automationRequest(type) {
   if (automationBusy) return;
   const task = taskRows.find((row) => row.id === $("task").value);
@@ -374,7 +345,9 @@ async function automationRequest(type) {
       }
     }
     if (!response?.ok) {
-      if (!automationErrorShownInCard(response?.job))
+      if (
+        !deriveZxgkAutomationProgressViewModel(response?.job).errorShownInCard
+      )
         throw new Error(response?.error || "自动核查失败，请返回手工模式。");
       if (refreshError) throw refreshError;
       return;

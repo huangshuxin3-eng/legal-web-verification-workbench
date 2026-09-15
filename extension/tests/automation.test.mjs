@@ -2090,7 +2090,8 @@ test("Side Panel 提供「继续本次核查」，与重新开始区分", async 
   assert.match(html, /id="automation-resume"/);
   assert.match(html, /继续本次核查/);
   assert.match(html, /id="automation-resume-block"/);
-  assert.match(panel, /canResumeFirstPage\(automationJob\)/);
+  assert.match(panel, /deriveZxgkAutomationProgressViewModel\(automationJob\)/);
+  assert.match(panel, /const resumable = progress\.canResume/);
   assert.match(panel, /automation-resume"\)\.onclick/);
   assert.match(panel, /本次核查未完成/);
   assert.match(panel, /下一项：/);
@@ -2162,11 +2163,15 @@ test("hasListCapture 把“已 finalize 但尚未收尾”也算作列表已留�
 });
 
 test("Side Panel 的列表留痕进度使用 hasListCapture，不谎报待留痕", async () => {
-  const panel = await readFile(
-    new URL("../src/sidepanel.mjs", import.meta.url),
-    "utf8",
-  );
-  assert.match(panel, /hasListCapture/);
+  const [panel, progressView] = await Promise.all([
+    readFile(new URL("../src/sidepanel.mjs", import.meta.url), "utf8"),
+    readFile(
+      new URL("../src/lib/automation-progress-view.mjs", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.match(panel, /progress\.listCaptureComplete/);
+  assert.match(progressView, /hasListCapture\(job\)/);
   assert.doesNotMatch(panel, /listCapture \?/);
 });
 
@@ -2500,10 +2505,10 @@ test("自动核查自身的失败不再写进手工错误行，手工错误也�
     /queryId: \$\("query"\)\.value/,
   );
   // 卡片已展示的自动核查失败不再占用页面底部错误行。
-  assert.match(panel, /function automationErrorShownInCard\(job\)/);
+  assert.match(panel, /deriveZxgkAutomationProgressViewModel\(response\?\.job\)/);
   assert.match(
     panel,
-    /if \(!automationErrorShownInCard\(response\?\.job\)\)\s*\n\s*throw new Error\(response\?\.error/,
+    /\.errorShownInCard\s*\n\s*\)\s*\n\s*throw new Error\(response\?\.error/,
   );
   // 手工留痕仍然只使用手工下拉框的 Query。
   assert.match(panel, /type: "archive",\s*\n\s*queryId: \$\("query"\)\.value,/);
