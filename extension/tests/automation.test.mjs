@@ -88,8 +88,10 @@ async function harness(result, options = {}) {
   };
   const details = new Map();
   const detailOverrides = options.detailOverrides || {};
+  // 虚拟时钟：Slice 4B 的有界观察循环必须能在测试里推进，否则会一直等真实时间。
+  let clockMs = Date.parse("2026-09-15T08:00:00.000Z");
   const dependencies = {
-    now: () => new Date("2026-09-15T08:00:00.000Z"),
+    now: () => new Date(clockMs),
     getTask: async () => ({ ...executionTask }),
     getActiveTab: async () => ({ id: 21, url: "https://example.com/" }),
     getTab: async (tabId) => {
@@ -134,6 +136,29 @@ async function harness(result, options = {}) {
     submitQuery: async (tabId) => {
       calls.push(["submit", tabId]);
       return { ok: true };
+    },
+    // Slice 4B：提交后必须真的观察到安全验证组件进入可操作状态。
+    // 默认桩直接给出 READY（真人 READY 样本：overlay+parent+root 存在、loading 不可见）。
+    readVerificationAvailability: async (tabId) => {
+      calls.push(["read-verification", tabId]);
+      const override = options.verificationAvailability?.();
+      if (override) return override;
+      if (options.verificationFacts) return options.verificationFacts;
+      return {
+        ok: true,
+        overlayPresent: true,
+        parentPresent: true,
+        loadingPresent: false,
+        loadingVisible: false,
+        rootPresent: true,
+        statusText: null,
+        failureEvidence: null,
+      };
+    },
+    // 观察循环需要可推进的时钟：默认每次 sleep 前进 1 秒。
+    sleep: async (ms) => {
+      if (options.onSleep) return options.onSleep(ms);
+      clockMs += ms;
     },
     inspectResult: async () => {
       calls.push(["inspect-after-human"]);
@@ -419,6 +444,8 @@ test("开始流程只填写 entity_name 并提交，随后停在 CAPTCHA 人工�
     ["open", 21],
     ["fill-entity-only", 21, executionTask.entity_name],
     ["submit", 21],
+    // Slice 4B：提交之后必须先真的观察到安全验证组件进入可操作状态。
+    ["read-verification", 21],
   ]);
   assert.equal(named(run, "inspect-after-human").length, 0);
   assert.equal(named(run, "create-query").length, 0);
@@ -686,7 +713,7 @@ test("DONE/FAILED/HAS_RESULT/FIRST_PAGE_COMPLETE 允许新一轮，运行中状�
     false,
   );
   assert.equal(
-    state.canResumeFirstPage({
+    state.canResumeAutomation({
       state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
     }),
     false,
@@ -1187,6 +1214,10 @@ test("自动流程复用 archive，手工 Query 与留痕入口继续保留", as
   assert.match(worker, /closeDetail: closeDetailTab/);
   assert.doesNotMatch(worker, /reserve_capture_upload|finish_capture_upload/);
   assert.doesNotMatch(worker, /max\(capture_no\)|capture_no \+ 1|captureNo \+ 1/);
+  assert.doesNotMatch(
+    worker,
+    /max\(capture_no\)|capture_no \+ 1|captureNo \+ 1/,
+  );
   assert.doesNotMatch(
     worker,
     /Input\.dispatchMouseEvent|mousePressed|captchaId/,
@@ -1720,7 +1751,7 @@ test("详情处理到第 6 条失败后，继续本次核查从第 6 条开始",
   });
   const failed = run.job;
   assert.equal(failed.state, state.AUTOMATION_STATES.FAILED);
-  assert.equal(state.canResumeFirstPage(failed), true);
+  assert.equal(state.canResumeAutomation(failed), true);
   assert.equal(failed.queryId, "query-7");
   assert.equal(failed.listCapture.capture_no, 3);
   assert.deepEqual(failed.completedDetailKeys, keys.slice(0, 5));
@@ -1808,7 +1839,7 @@ test("继续本次核查仍停在 CAPTCHA 人工接管，不跳过人工验证",
     resumed.state,
     state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
   );
-  assert.equal(state.canResumeFirstPage(resumed), false);
+  assert.equal(state.canResumeAutomation(resumed), false);
   assert.equal(named(run, "inspect-after-human").length, 1);
 });
 
@@ -1906,11 +1937,11 @@ test("列表留痕 finalize 成功但尚未补记时，继续本次核查绝不�
     state.AUTOMATION_INTERRUPTED_STATES.includes(crashed.state),
     true,
   );
-  assert.equal(state.canResumeFirstPage(crashed), false);
+  assert.equal(state.canResumeAutomation(crashed), false);
 
   run.interrupt();
   assert.equal(run.job.state, state.AUTOMATION_STATES.FAILED);
-  assert.equal(state.canResumeFirstPage(run.job), true);
+  assert.equal(state.canResumeAutomation(run.job), true);
   // 进度显示也不谎报“待留痕”。
   assert.equal(state.hasListCapture(run.job), true);
 
@@ -2046,8 +2077,10 @@ test("继续本次核查时结果集合变化（增加/减少/重复）都 fail 
     );
     assert.equal(run.job.queryId, "query-7", mutate.name);
     assert.equal(run.job.listCapture.capture_no, 3, mutate.name);
-    // 进度仍然保留，可人工核对后再次决定。
-    assert.equal(state.canResumeFirstPage(run.job), true, mutate.name);
+    // Slice 4B：结果集已经变化 = checkpoint identity 已失效，再「继续本次核查」
+    // 只会重复同一个失败，因此必须 fail closed 到手工模式而不是给出必然失败的动作。
+    assert.equal(run.job.errorCode, "RESUME_BOUNDARY_CHANGED", mutate.name);
+    assert.equal(state.canResumeAutomation(run.job), false, mutate.name);
   }
 });
 
@@ -2076,7 +2109,7 @@ test("继续本次核查时 Task 变化或选择不匹配都 fail closed", async
   assert.equal(named(run, "archive-existing-m4").length, archivesBefore);
 });
 
-test("没有第一页进度时不提供「继续本次核查」", async () => {
+test("没有核查进度时不提供「继续本次核查」", async () => {
   const { state } = await modules();
   const run = await harness(state.AUTOMATION_RESULT.NO_RESULT);
   await run.automation.start({
@@ -2086,14 +2119,14 @@ test("没有第一页进度时不提供「继续本次核查」", async () => {
   await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(state.canResumeFirstPage(run.job), false);
+  assert.equal(state.canResumeAutomation(run.job), false);
   await assert.rejects(
     run.automation.resume({ taskId: executionTask.id }),
-    /没有可继续的第一页核查进度/,
+    /没有可继续的核查进度/,
   );
 });
 
-test("canResumeFirstPage 只在存在未完成第一页进度时为真", async () => {
+test("canResumeAutomation 只在存在可恢复检查点时为真", async () => {
   const { state } = await modules();
   const base = {
     state: state.AUTOMATION_STATES.FAILED,
@@ -2101,39 +2134,104 @@ test("canResumeFirstPage 只在存在未完成第一页进度时为真", async (
     queryId: "query-7",
     pageOneRowKeys: ["k"],
   };
-  assert.equal(state.canResumeFirstPage(base), true);
+  assert.equal(state.canResumeAutomation(base), true);
   assert.equal(
-    state.canResumeFirstPage({
+    state.canResumeAutomation({
       ...base,
       result: state.AUTOMATION_RESULT.NO_RESULT,
     }),
     false,
   );
-  assert.equal(state.canResumeFirstPage({ ...base, queryId: null }), false);
-  assert.equal(state.canResumeFirstPage({ ...base, pageOneRowKeys: [] }), false);
+  assert.equal(state.canResumeAutomation({ ...base, queryId: null }), false);
   assert.equal(
-    state.canResumeFirstPage({ ...base, pageOneRowKeys: null }),
+    state.canResumeAutomation({ ...base, pageOneRowKeys: [] }),
     false,
   );
   assert.equal(
-    state.canResumeFirstPage({
+    state.canResumeAutomation({ ...base, pageOneRowKeys: null }),
+    false,
+  );
+  assert.equal(
+    state.canResumeAutomation({
       ...base,
       state: state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE,
     }),
     false,
   );
   assert.equal(
-    state.canResumeFirstPage({
+    state.canResumeAutomation({
       ...base,
       state: state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
     }),
     false,
   );
-  // 第 2 页起没有安全的 fresh resume 路径：不得给出「继续本次核查」这种
-  // 必然失败的动作（它会拿第 1 页的 keys 去 reconcile 第 2 页）。
-  assert.equal(state.canResumeFirstPage({ ...base, currentPage: 2 }), false);
+  // 第 1 页的检查点：恢复目标就是第 1 页（state 层只回答“回到第几页”，
+  // 不持有任何分页语义）。
+  assert.deepEqual(state.deriveResumeTarget(base), { ok: true, targetPage: 1 });
+  // 第 2 页的检查点（第 1 页已完成、第 2 页已冻结）同样可恢复：
+  // fresh resume 会重建页面、重新人工验证，然后重新跳到第 2 页。
+  assert.deepEqual(
+    state.deriveResumeTarget({
+      ...base,
+      currentPage: 2,
+      totalPages: 21,
+      pageFrozenKeys: ["k2"],
+      completedPages: [{ pageNo: 1, detailCount: 1 }],
+      pageOneRowKeys: ["k"],
+    }),
+    { ok: true, targetPage: 2 },
+  );
+  // 但缺少页坐标 / baseline / 已完成页时，第 2 页仍然不可恢复：
+  // 没有 totalPages baseline 就没有可以对照的结果集身份。
   assert.equal(
-    state.canResumeFirstPage({
+    state.canResumeAutomation({ ...base, currentPage: 2 }),
+    false,
+    "缺少 totalPages baseline 时第 2 页不可恢复",
+  );
+  assert.equal(
+    state.canResumeAutomation({
+      ...base,
+      currentPage: 2,
+      totalPages: 21,
+      pageFrozenKeys: ["k2"],
+      completedPages: [],
+    }),
+    false,
+    "第 1 页尚未完成时第 2 页不可恢复",
+  );
+  // 第 3 页及以后没有安全的 fresh resume 路径（本切片只有两页边界）。
+  assert.equal(
+    state.canResumeAutomation({
+      ...base,
+      currentPage: 3,
+      totalPages: 21,
+      pageFrozenKeys: ["k3"],
+      completedPages: [
+        { pageNo: 1, detailCount: 1 },
+        { pageNo: 2, detailCount: 1 },
+      ],
+    }),
+    false,
+  );
+  // checkpoint identity 已经失效时不再提供「继续本次核查」：resume 只会重复同一个失败。
+  assert.equal(
+    state.canResumeAutomation({ ...base, errorCode: "TOTAL_PAGES_CHANGED" }),
+    false,
+  );
+  assert.equal(
+    state.canResumeAutomation({
+      ...base,
+      errorCode: "RESUME_BOUNDARY_CHANGED",
+    }),
+    false,
+  );
+  assert.equal(
+    state.canResumeAutomation({ ...base, errorCode: "PAGE_ADVANCE_TIMEOUT" }),
+    true,
+    "临时性失败仍然是可恢复的",
+  );
+  assert.equal(
+    state.canResumeAutomation({
       ...base,
       state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
       currentPage: 2,
@@ -2200,6 +2298,10 @@ test("hasListCapture 把“已 finalize 但尚未收尾”也算作列表已留�
   const { state } = await modules();
   assert.equal(state.hasListCapture({ listCapture: { id: "capture-3" } }), true);
   assert.equal(
+    state.hasListCapture({ listCapture: { id: "capture-3" } }),
+    true,
+  );
+  assert.equal(
     state.hasListCapture({
       listCapture: null,
       currentOperation: { type: "LIST", captureId: "capture-3" },
@@ -2262,10 +2364,11 @@ test("原自动化标签页仍在时，继续本次核查复用它，不新建�
   // 由 worker 决定，而不是假设页面还能用。
   assert.deepEqual(run.openedUrls.at(-1), { tabId: 21, currentUrl: listUrl });
   // 重新填主体 → 重新提交 → 再次等人工验证。
-  assert.deepEqual(run.calls.slice(-3), [
+  assert.deepEqual(run.calls.slice(-4), [
     ["open", 21],
     ["fill-entity-only", 21, executionTask.entity_name],
     ["submit", 21],
+    ["read-verification", 21],
   ]);
   // 重建环境后停在人工验证：resume 自己不检查结果，必须由人过 CAPTCHA。
   assert.equal(named(run, "inspect-after-human").length, 1);
@@ -2305,10 +2408,11 @@ test("原自动化标签页已关闭时，新建标签页并写回 job，不导�
     currentUrl: listUrl,
   });
   // 后续流程与复用原标签页完全一致：查询 → 重新填主体 → 重新提交 → 人工验证。
-  assert.deepEqual(run.calls.slice(-3), [
+  assert.deepEqual(run.calls.slice(-4), [
     ["open", newTabId],
     ["fill-entity-only", newTabId, executionTask.entity_name],
     ["submit", newTabId],
+    ["read-verification", newTabId],
   ]);
   assert.equal(
     resumed.state,
@@ -2334,7 +2438,7 @@ test("新建标签页后，人工验证 → reconcile → 继续未完成项照�
   const newTabId = run.job.tabId;
   assert.notEqual(newTabId, 21);
 
-  // 人工过 CAPTCHA 后点“重新检查结果”：resumeFirstPage 在新标签页上重新读第 1 页，
+  // 人工过 CAPTCHA 后点“重新检查结果”：resumeCheckpoint 在新标签页上重新证明第 1 页，
   // 与原 pageOneRowKeys 严格 reconcile 后继续未完成项。
   const finished = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
@@ -2572,6 +2676,10 @@ test("自动核查自身的失败不再写进手工错误行，手工错误也�
   assert.match(panel, /deriveZxgkAutomationProgressViewModel\(response\?\.job\)/);
   assert.match(
     panel,
+    /deriveZxgkAutomationProgressViewModel\(response\?\.job\)/,
+  );
+  assert.match(
+    panel,
     /\.errorShownInCard\s*\n\s*\)\s*\n\s*throw new Error\(response\?\.error/,
   );
   // 手工留痕仍然只使用手工下拉框的 Query。
@@ -2593,9 +2701,10 @@ test("worker 与自动化层共用同一套查询页重建流程，必要时重�
   );
   assert.match(worker, /const tab = await waitForTabComplete\(tabId\);\s*\n\s*if \(!isZxgkExecutionPage\(tab\?\.url\)\)/);
   assert.match(worker, /页面未进入中国执行信息公开网综合查询入口/);
-  // start 与 continue 使用同一个 openQueryPage：continue 不是“就地续跑”。
+  // start 与 resume 使用同一个 openQueryPage：resume 不是“就地续跑”。
+  // Slice 4B 起两者都显式要求重建验证环境（第三个参数 force），因此这里只匹配调用前缀。
   assert.equal(
-    (workflow.match(/openQueryPage\(tab\.id, tab\.url\)/g) || []).length,
+    (workflow.match(/openQueryPage\(tab\.id, tab\.url[,)]/g) || []).length,
     2,
   );
   assert.doesNotMatch(workflow, /history\.back/);
@@ -2631,4 +2740,304 @@ test("worker 与自动化层共用同一套查询页重建流程，必要时重�
   // worker 里只有两处 tabs.update，都带显式 tabId（查询页导航 / 关闭详情后切回列表），
   // 不存在“导航用户当前活动标签页”的写法。
   assert.equal((worker.match(/chrome\.tabs\.update\(/g) || []).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// Slice 4B：提交后的有界安全验证观察
+// ---------------------------------------------------------------------------
+
+/** 组件正在加载：弹窗已经在，但取图还没成功。 */
+const LOADING_FACTS = {
+  ok: true,
+  overlayPresent: true,
+  parentPresent: true,
+  loadingPresent: true,
+  loadingVisible: true,
+  rootPresent: false,
+  statusText: null,
+  failureEvidence: null,
+};
+
+/** 弹窗整个不存在：真人证明它有多重业务含义。 */
+const ABSENT_FACTS = {
+  ok: true,
+  overlayPresent: false,
+  parentPresent: false,
+  loadingPresent: false,
+  loadingVisible: false,
+  rootPresent: false,
+  statusText: null,
+  failureEvidence: null,
+};
+
+test("V6. 提交后必须真的观察到 READY 才交给人工验证", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT);
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION);
+  assert.equal(job.error, null);
+  assert.equal(job.errorCode, null);
+  // 一读就是 READY，因此只需要观察一次，不做无谓轮询。
+  assert.equal(named(run, "read-verification").length, 1);
+  assert.equal(named(run, "inspect-after-human").length, 0);
+});
+
+test("V7. 组件长时间没有进入 READY → PAUSED，且文案只说“长时间未就绪”", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({ ...LOADING_FACTS }),
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  assert.equal(job.errorCode, "VERIFICATION_WIDGET_UNAVAILABLE");
+  assert.match(job.error, /长时间未就绪/);
+  assert.match(job.error, /45 秒/);
+  // 真实页面没有"加载失败"的 DOM 证据，因此只能说明"未就绪"，并显式否认失败结论。
+  assert.match(job.error, /没有报告加载失败/);
+  assert.doesNotMatch(job.error, /接口|故障|网络错误/);
+  // 有界：不是无限重试。
+  const reads = named(run, "read-verification").length;
+  assert.ok(reads > 1 && reads <= 100, `reads=${reads}`);
+  // 观察期间不做任何结果判定或留痕。
+  assert.equal(named(run, "inspect-after-human").length, 0);
+  assert.equal(named(run, "archive-existing-m4").length, 0);
+  assert.equal(job.result, null);
+});
+
+test("V8. 一直没有观察到安全验证组件 → PAUSED(NOT_OBSERVED)，不伪造 widget 证据", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({ ...ABSENT_FACTS }),
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  assert.equal(job.errorCode, "VERIFICATION_WIDGET_NOT_OBSERVED");
+  assert.match(job.error, /没有在页面上观察到安全验证组件/);
+  // 与"组件存在但没就绪"是两档不同的结论，绝不混用文案。
+  assert.doesNotMatch(job.error, /长时间未就绪/);
+  assert.equal(named(run, "inspect-after-human").length, 0);
+});
+
+test("V9. 观察循环有界：即使时钟完全不前进也一定会结束", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({ ...LOADING_FACTS }),
+    // 时钟不推进：只有轮询上限能结束循环，从而证明不存在无限 retry。
+    onSleep: async () => {},
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  assert.equal(job.errorCode, "VERIFICATION_WIDGET_UNAVAILABLE");
+  const reads = named(run, "read-verification").length;
+  assert.ok(reads >= 90 && reads <= 100, `reads=${reads}`);
+});
+
+// 真人页面事实（Runtime Probe）：上一轮留下的失效文案可以在新组件正常加载期间继续存在。
+const STALE_EXPIRED_STATUS = "验证已失效：安全验证已失效。请重新验证。";
+
+/** 组件已经在页面上、但还没进入可操作状态（root 与 loading 同时可见这种矛盾事实）。 */
+const PRESENT_NOT_READY_FACTS = {
+  ok: true,
+  overlayPresent: true,
+  parentPresent: true,
+  loadingPresent: true,
+  loadingVisible: true,
+  rootPresent: true,
+  statusText: null,
+  failureEvidence: null,
+};
+
+test("V10. 陈旧失效文案不构成 Phase A 的 PAUSE 依据", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({
+      ...PRESENT_NOT_READY_FACTS,
+      failureEvidence: STALE_EXPIRED_STATUS,
+    }),
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  // Phase A 只回答"组件是否已进入 READY"，不消费 outcome：真人证明旧的失效文案
+  // 可以一直留在页面上，据此 PAUSE 会误杀本来可以正常验证的页面。
+  assert.notEqual(job.errorCode, "VERIFICATION_REQUIRED");
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  assert.equal(job.errorCode, "VERIFICATION_WIDGET_UNAVAILABLE");
+  // 陈旧 outcome 也不缩短观察：仍然是完整的有界观察。
+  const reads = named(run, "read-verification").length;
+  assert.ok(reads > 1 && reads <= 100, `reads=${reads}`);
+});
+
+test("V11. 页面自己宣布验证已通过 → 仍然停在人工交接点，不重复要求验证", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({
+      ...LOADING_FACTS,
+      statusText: "验证已通过，正在查询…",
+    }),
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION);
+  assert.equal(job.errorCode, null);
+});
+
+test("V12. 读取页面事实失败不推断原因：继续观察到上限，仍走同一档 PAUSED", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => {
+      throw new Error("evaluate failed");
+    },
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  // 读不到事实既不是"没就绪"也不是"组件不存在"，只能归到最泛的一档。
+  assert.equal(job.errorCode, "VERIFICATION_WIDGET_UNAVAILABLE");
+  assert.match(job.error, /长时间未就绪/);
+  assert.ok(named(run, "read-verification").length > 1);
+});
+
+test("V13. 观察上限常量与文案语义被锁定：45s / 只说“长时间未就绪”", async () => {
+  const workflow = await loadSourceModule("lib/zxgk-automation.mjs");
+  assert.equal(workflow.VERIFICATION_WIDGET_READY_DEADLINE_MS, 45000);
+  assert.equal(
+    workflow.VERIFICATION_WIDGET_UNAVAILABLE_CODE,
+    "VERIFICATION_WIDGET_UNAVAILABLE",
+  );
+  assert.equal(
+    workflow.VERIFICATION_WIDGET_NOT_OBSERVED_CODE,
+    "VERIFICATION_WIDGET_NOT_OBSERVED",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Slice 4B 修正 1：陈旧 verification outcome 不得成为 Phase A 的 PAUSE 依据
+// （真人 Runtime Probe：LOADING 期间页面上仍留着上一轮的“验证已失效”文案）
+// ---------------------------------------------------------------------------
+
+/** 真人 READY 样本：overlay + parent + root 存在，loading 不可见。 */
+const READY_FACTS = {
+  ok: true,
+  overlayPresent: true,
+  parentPresent: true,
+  loadingPresent: false,
+  loadingVisible: false,
+  rootPresent: true,
+  statusText: null,
+  failureEvidence: null,
+};
+
+test("V14. LOADING 期的旧失效文案不阻断观察：组件 READY 后照常交给人工", async () => {
+  const { state } = await modules();
+  let reads = 0;
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => {
+      reads += 1;
+      // poll 1 = 真人 State B 的开窗瞬间：取图还没回来，状态胶囊仍是上一轮的失效文案。
+      if (reads === 1)
+        return { ...LOADING_FACTS, statusText: STALE_EXPIRED_STATUS };
+      // poll 2 ≈ 1 秒后组件就绪，而旧文案仍然留在页面上。
+      return { ...READY_FACTS, statusText: STALE_EXPIRED_STATUS };
+    },
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION);
+  assert.notEqual(job.errorCode, "VERIFICATION_REQUIRED");
+  assert.equal(job.errorCode, null);
+  // 只观察到就绪为止，不做无谓轮询，也不因此 PAUSE。
+  assert.equal(named(run, "read-verification").length, 2);
+  assert.equal(named(run, "inspect-after-human").length, 0);
+});
+
+test("V15. READY + 旧失效文案 → 仍然交给人工，允许重新完成验证", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({
+      ...READY_FACTS,
+      statusText: STALE_EXPIRED_STATUS,
+    }),
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION);
+  assert.equal(job.errorCode, null);
+  assert.equal(named(run, "read-verification").length, 1);
+});
+
+test("V16. 人工验证之后页面仍明确报失效 → PAUSED(VERIFICATION_REQUIRED)", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.HAS_RESULT);
+  await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  assert.equal(
+    run.job.state,
+    state.AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
+  );
+  // 人已经点了「验证完成，继续」，此刻重新读取真实页面：这时的失效文案
+  // 才是"本次人工验证没有被网站接受"的证据。
+  run.dependencies.readVerificationAvailability = async (tabId) => {
+    run.calls.push(["read-verification", tabId]);
+    return {
+      ...PRESENT_NOT_READY_FACTS,
+      loadingPresent: false,
+      loadingVisible: false,
+      failureEvidence: STALE_EXPIRED_STATUS,
+    };
+  };
+  const job = await run.automation.continueAfterVerification({
+    taskId: executionTask.id,
+  });
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  assert.equal(job.errorCode, "VERIFICATION_REQUIRED");
+  assert.match(job.error, /安全验证已失效/);
+  // 验证没被接受时绝不进入结果判定，也绝不产生任何留痕。
+  assert.equal(named(run, "inspect-after-human").length, 0);
+  assert.equal(named(run, "create-query").length, 0);
+  assert.equal(named(run, "archive-existing-m4").length, 0);
+});
+
+test("V17. LOADING 期旧失效文案持续到 deadline → WIDGET_UNAVAILABLE，绝不误报 VERIFICATION_REQUIRED", async () => {
+  const { state } = await modules();
+  const run = await harness(state.AUTOMATION_RESULT.NO_RESULT, {
+    verificationAvailability: () => ({
+      ...LOADING_FACTS,
+      statusText: STALE_EXPIRED_STATUS,
+    }),
+  });
+  const job = await run.automation.start({
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+  });
+  // 本次失败事实是"组件长时间没有进入 READY"，不是"验证被网站拒绝"。
+  assert.equal(job.state, state.AUTOMATION_STATES.PAUSED);
+  assert.notEqual(job.errorCode, "VERIFICATION_REQUIRED");
+  assert.equal(job.errorCode, "VERIFICATION_WIDGET_UNAVAILABLE");
+  assert.match(job.error, /长时间未就绪/);
+  const reads = named(run, "read-verification").length;
+  assert.ok(reads >= 90 && reads <= 100, `reads=${reads}`);
 });

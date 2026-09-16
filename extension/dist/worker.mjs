@@ -22,6 +22,7 @@ import {
   resultRowsExpression,
   resultSnapshotExpression,
   submitQueryExpression,
+  verificationAvailabilityExpression,
   ZXGK_EXECUTION_URL,
 } from "./adapters/zxgk-execution.mjs";
 import {
@@ -210,15 +211,21 @@ async function archive(queryId, requestedTabId, context = "manual") {
   }
 }
 
-function waitForTabComplete(tabId, timeoutMs = 30000) {
+function waitForTabComplete(tabId, timeoutMs = 30000, options = {}) {
+  // requireReload=true 时要求先观察到 status → loading 才接受 complete：
+  // 强制重新加载同一个 URL 时，旧文档的 complete 状态会让"就绪"被提前判定。
+  const requireReload = options?.requireReload === true;
   return new Promise((resolve, reject) => {
     let settled = false;
+    let sawLoading = false;
     const timer = setTimeout(
       () => finish(new Error("综合查询页面加载超时。")),
       timeoutMs,
     );
     const onUpdated = (updatedId, change, tab) => {
-      if (updatedId === tabId && change.status === "complete")
+      if (updatedId !== tabId) return;
+      if (change.status === "loading") sawLoading = true;
+      if (change.status === "complete" && (!requireReload || sawLoading))
         finish(null, tab);
     };
     const onRemoved = (removedId) => {
@@ -235,6 +242,9 @@ function waitForTabComplete(tabId, timeoutMs = 30000) {
     };
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.onRemoved.addListener(onRemoved);
+    // 监听器必须先于导航动作注册（见 openQueryPage），因此非强制路径才用
+    // "当前已经 complete" 作为短路。
+    if (requireReload) return;
     chrome.tabs.get(tabId).then(
       (tab) => {
         if (tab.status === "complete") finish(null, tab);
@@ -244,9 +254,27 @@ function waitForTabComplete(tabId, timeoutMs = 30000) {
   });
 }
 
-async function openQueryPage(tabId, currentUrl) {
+/**
+ * 打开综合查询入口。
+ *
+ * force=true（全新核查与「继续本次核查」都使用）会把**已经停在入口**的标签页也重新
+ * 加载一次。真实页面事实：安全验证的令牌与弹窗状态全是内存态，只有真正重新加载
+ * 才能得到「从零开始」的验证环境；否则上一轮残留的令牌会让本轮提交直接跳过验证，
+ * 安全验证观察也就失去确定含义。
+ *
+ * 监听器先注册、动作后发出，避免错过 loading 事件；强制重新加载同一个 URL 时
+ * 旧文档的 complete 会让"就绪"被提前判定，因此必须真的看到一次 loading。
+ */
+async function openQueryPage(tabId, currentUrl, options = {}) {
+  const force = options?.force === true;
+  const onEntry = isZxgkExecutionPage(currentUrl);
+  if (!force && onEntry) return waitForTabComplete(tabId);
+  const waiting = waitForTabComplete(tabId, 30000, { requireReload: onEntry });
   if (!isZxgkExecutionPage(currentUrl))
     await chrome.tabs.update(tabId, { url: ZXGK_EXECUTION_URL });
+  else await chrome.tabs.reload(tabId);
+  await waiting;
+  // 复核落地 URL：上面等的是"这一次动作真的加载完成"，这里再取一次最终标签页。
   const tab = await waitForTabComplete(tabId);
   if (!isZxgkExecutionPage(tab?.url))
     throw new Error("页面未进入中国执行信息公开网综合查询入口。");
@@ -304,6 +332,17 @@ async function readResultPage(tabId) {
 async function jumpToPage(tabId, targetPage) {
   await checkedTab(tabId);
   return evaluateInTab(tabId, jumpToPageExpression(targetPage));
+}
+
+/**
+ * 读取安全验证组件的可观察事实（M8.2b Slice 4B）。
+ *
+ * 只把 adapter 生成的页面表达式注入标签页并原样返回事实：不分类、不写状态、
+ * 不做任何"网站是否异常"的判断（那属于 lib/zxgk-automation.mjs 的职责）。
+ */
+async function readVerificationAvailability(tabId) {
+  await checkedTab(tabId);
+  return evaluateInTab(tabId, verificationAvailabilityExpression());
 }
 
 /**
@@ -404,6 +443,7 @@ const automation = createZxgkAutomation({
     await checkedTab(tabId);
     return evaluateInTab(tabId, submitQueryExpression());
   },
+  readVerificationAvailability,
   inspectResult: async (tabId, reportedUrl) => {
     await checkedTab(tabId, reportedUrl);
     const snapshot = await evaluateInTab(tabId, resultSnapshotExpression());

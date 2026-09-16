@@ -418,3 +418,196 @@ test("resultRowsExpression：验证失败只由页面自己的提示证明，其
   // 页面表达式只读取事实，不决定任何 orchestration 语义。
   assert.doesNotMatch(expression, /PAUSED|REQUIRES_VERIFICATION|job\b/);
 });
+
+// ---------------------------------------------------------------------------
+// F. 安全验证组件的页面事实（M8.2b Slice 4B）
+// ---------------------------------------------------------------------------
+
+/** 真人 READY 样本：overlay + parent + root 都在，loading 不可见。 */
+const READY_FACTS = {
+  ok: true,
+  overlayPresent: true,
+  parentPresent: true,
+  loadingPresent: false,
+  loadingVisible: false,
+  rootPresent: true,
+  statusText: null,
+  failureEvidence: null,
+};
+
+test("V1. 安全验证四态：真人页面样本各自映射到唯一 availability", async () => {
+  const adapter = await loadSourceModule("adapters/zxgk-execution.mjs");
+  const S = adapter.ZXGK_VERIFICATION_WIDGET_STATES;
+
+  assert.equal(
+    adapter.classifyVerificationAvailability(READY_FACTS).state,
+    S.READY,
+  );
+  // LOADING：弹窗已经在，但取图还没成功（root 尚未创建）。
+  assert.equal(
+    adapter.classifyVerificationAvailability({
+      ...READY_FACTS,
+      rootPresent: false,
+      loadingPresent: true,
+      loadingVisible: true,
+    }).state,
+    S.LOADING,
+  );
+  // NOT_PRESENT：弹窗整个不存在——这是**预期事实**，不是错误。
+  assert.equal(
+    adapter.classifyVerificationAvailability({
+      ...READY_FACTS,
+      overlayPresent: false,
+      parentPresent: false,
+      rootPresent: false,
+    }).state,
+    S.NOT_PRESENT,
+  );
+  // 矛盾事实（root 与 loading 同时可见）不得猜成 READY。
+  assert.equal(
+    adapter.classifyVerificationAvailability({
+      ...READY_FACTS,
+      loadingPresent: true,
+      loadingVisible: true,
+    }).state,
+    S.PRESENT_BUT_NOT_READY,
+  );
+  // 只有 overlay / parent 之一缺失也一律 NOT_PRESENT。
+  for (const patch of [{ overlayPresent: false }, { parentPresent: false }])
+    assert.equal(
+      adapter.classifyVerificationAvailability({ ...READY_FACTS, ...patch })
+        .state,
+      S.NOT_PRESENT,
+    );
+});
+
+test("V2. 读不到页面事实时 fail closed：不猜任何一种 availability", async () => {
+  const adapter = await loadSourceModule("adapters/zxgk-execution.mjs");
+  for (const facts of [null, undefined, { ok: false }]) {
+    const result = adapter.classifyVerificationAvailability(facts);
+    assert.equal(result.ok, false);
+    assert.equal(result.state, null);
+    assert.equal(result.outcome, adapter.ZXGK_VERIFICATION_OUTCOMES.UNKNOWN);
+    assert.match(result.error, /无法读取安全验证组件的页面事实/);
+  }
+});
+
+test("V3. availability 与 outcome 正交：组件 READY 也可能是验证已失效", async () => {
+  const adapter = await loadSourceModule("adapters/zxgk-execution.mjs");
+  const O = adapter.ZXGK_VERIFICATION_OUTCOMES;
+  const S = adapter.ZXGK_VERIFICATION_WIDGET_STATES;
+
+  // 真人新证据：结果区写明安全验证已失效。
+  const expired = adapter.classifyVerificationAvailability({
+    ...READY_FACTS,
+    failureEvidence: "验证已失效：安全验证已失效。请重新验证。",
+  });
+  assert.equal(expired.state, S.READY);
+  assert.equal(expired.outcome, O.REJECTED_OR_EXPIRED);
+
+  // 状态胶囊宣布已通过：同一 availability，不同 outcome。
+  const verified = adapter.classifyVerificationAvailability({
+    ...READY_FACTS,
+    statusText: "验证已通过，正在查询…",
+  });
+  assert.equal(verified.state, S.READY);
+  assert.equal(verified.outcome, O.VERIFIED_OR_QUERYING);
+
+  // 旧文案继续识别；全角/空白差异不影响判定。
+  for (const text of [
+    "验证码错误",
+    "验证码已过期",
+    "验证已过期",
+    "验证码错误，请重新验证",
+  ])
+    assert.equal(
+      adapter.classifyVerificationOutcome({
+        ...READY_FACTS,
+        failureEvidence: text,
+      }),
+      O.REJECTED_OR_EXPIRED,
+      text,
+    );
+  // 状态胶囊里的失效文案同样算证据。
+  assert.equal(
+    adapter.classifyVerificationOutcome({
+      ...READY_FACTS,
+      statusText: "验证已失效：安全验证已失效。请重新验证。",
+    }),
+    O.REJECTED_OR_EXPIRED,
+  );
+});
+
+test("V4. 没有明确证据时是 UNKNOWN，绝不推断成“未验证”", async () => {
+  const adapter = await loadSourceModule("adapters/zxgk-execution.mjs");
+  const O = adapter.ZXGK_VERIFICATION_OUTCOMES;
+  const S = adapter.ZXGK_VERIFICATION_WIDGET_STATES;
+
+  // NOT_PRESENT 且没有任何文案：多重业务含义，只能是 UNKNOWN。
+  const gone = adapter.classifyVerificationAvailability({
+    ...READY_FACTS,
+    overlayPresent: false,
+    parentPresent: false,
+    rootPresent: false,
+  });
+  assert.equal(gone.state, S.NOT_PRESENT);
+  assert.equal(gone.outcome, O.UNKNOWN);
+  // 组件还在、但没有通过也没有失败，才是 UNVERIFIED。
+  assert.equal(
+    adapter.classifyVerificationOutcome({
+      overlayPresent: true,
+      parentPresent: true,
+    }),
+    O.UNVERIFIED,
+  );
+  // 与"验证失败"无关的结果区提示不是证据。
+  for (const other of ["系统繁忙，请稍后再试。", "暂无数据", ""])
+    assert.equal(
+      adapter.classifyVerificationOutcome({
+        ...READY_FACTS,
+        failureEvidence: other,
+      }),
+      O.UNVERIFIED,
+      other,
+    );
+});
+
+test("V5. 页面表达式只读同源开关型事实：不含随机 id / 滑块 / 跨域能力 / resultVisible", async () => {
+  const adapter = await loadSourceModule("adapters/zxgk-execution.mjs");
+  const expression = adapter.verificationAvailabilityExpression();
+
+  // 被真人否定的 selector 一个都不能出现。
+  assert.doesNotMatch(expression, /captcha-ui-mount/);
+  assert.doesNotMatch(expression, /slider-move-btn|slider-verify|ui-err/);
+  // 不引入任何跨域 / 注入 / 绕过能力。
+  assert.doesNotMatch(expression, /iframe|canvas|postMessage|chrome\./);
+  // resultVisible 不能作为环境可信 gate。
+  assert.doesNotMatch(expression, /resultVisible/);
+  // 只产出事实，不做判定。
+  assert.doesNotMatch(expression, /READY|NOT_PRESENT|UNKNOWN/);
+
+  // 必须真的读取这五个开关型事实。
+  for (const key of [
+    "overlayPresent",
+    "parentPresent",
+    "loadingPresent",
+    "loadingVisible",
+    "rootPresent",
+    "failureEvidence",
+  ])
+    assert.ok(expression.includes(key), key);
+
+  // 同一份 selector 表：adapter 导出的常量就是注入到页面里的那一份。
+  assert.deepEqual(Object.keys(adapter.ZXGK_VERIFICATION_SELECTORS).sort(), [
+    "loading",
+    "overlay",
+    "parent",
+    "root",
+    "status",
+  ]);
+  assert.ok(
+    expression.includes(
+      JSON.stringify(adapter.ZXGK_VERIFICATION_SELECTORS.overlay),
+    ),
+  );
+});

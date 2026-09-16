@@ -21,11 +21,70 @@ export const ZXGK_RESULT_HEADERS = Object.freeze([
  * `<p class="bg-warning warning-result"><span class="important">验证码错误或验证码已过期。</span></p>`
  * 写进结果区，同时给 `#page-div` / `#result-thead` 加 `hide`。
  *
- * 只有这段文字真的出现在页面上，才允许把「分页后读不到目标页」归类为需要人工
+ * M8.2b Slice 4B 补充（真人页面确认）：安全验证过期时状态胶囊还会显示
+ * `验证已失效：安全验证已失效。请重新验证。`（`tianaiCaptchaRestPage.js`
+ * 的 `textExpired` 默认文案），因此必须把「验证已失效」一并纳入判据。
+ *
+ * 只有这段文字真的出现在页面上，才允许把「读不到目标结果」归类为需要人工
  * 重新完成安全验证；任何其它读取异常都不得被推断成验证码问题。
  */
 export const ZXGK_VERIFICATION_FAILURE_PATTERN =
-  /验证码错误|验证码已过期|验证已过期/;
+  /验证码错误|验证码已过期|验证已过期|验证已失效/;
+
+/**
+ * 页面自己宣布「安全验证已通过」的文本判据。
+ *
+ * 真实文案由页面覆盖为 `验证已通过，正在查询…`（`index.html` 的 textVerified），
+ * 组件默认值是 `验证已通过，可点击查询`，因此只匹配前缀，不绑死后半句。
+ */
+export const ZXGK_VERIFICATION_QUERYING_PATTERN = /验证已通过/;
+
+/**
+ * 安全验证组件的可观察事实（M8.2b Slice 4A 真人在真实页面上确认）。
+ *
+ * 全部位于**同源主文档 DOM**：没有 iframe、没有 canvas、没有任何跨域内容，
+ * 因此这里只读选择器即可，不需要任何跨域或 token 相关能力。
+ *
+ * 有意不使用（真人不支持或语义不符）：
+ * - `.tianai-captcha-ui-mount` 的 id 含随机 uid；
+ * - 加载文案是 `::after` 伪元素，且弹窗内被 `content:none !important` 覆盖；
+ * - `#tianai-captcha-slider-move-btn`：真人 READY 样本里并不存在；
+ * - `tianai-slider-verify-*`：描述的是松开滑块之后的校验阶段，不是首次取图；
+ * - `.tianai-captcha-ui-err`：modal 模式下不可达。
+ */
+export const ZXGK_VERIFICATION_SELECTORS = Object.freeze({
+  /** 弹窗遮罩：只有弹窗打开时才存在。 */
+  overlay: ".tianai-captcha-ui-overlay",
+  /** SDK 根容器：唯一稳定的容器锚点（无随机 id）。 */
+  parent: "#tianai-captcha-parent",
+  /**
+   * 加载指示器：开关型信号（`showLoading()` 置 block / `closeLoading()` 置 none），
+   * 节点始终存在，判定必须基于 computed style 与几何，不能基于文案。
+   * 必须用父子链限定：同名 id 在 `#tianai-captcha .content` 内还有一个。
+   */
+  loading:
+    "#tianai-captcha-parent > #tianai-captcha-box > #tianai-captcha-loading",
+  /** 验证 UI 本体：只有取图成功之后才会被创建，是 READY 的直接证据。 */
+  root: "#tianai-captcha-parent #tianai-captcha-box > #tianai-captcha",
+  /** 页面自带的验证状态胶囊（组件在缺少时会自动插入）。 */
+  status: "#tianai-rest-captcha-status",
+});
+
+/** 安全验证组件的 availability（页面事实，不落库、不是 automation state）。 */
+export const ZXGK_VERIFICATION_WIDGET_STATES = Object.freeze({
+  NOT_PRESENT: "NOT_PRESENT",
+  LOADING: "LOADING",
+  READY: "READY",
+  PRESENT_BUT_NOT_READY: "PRESENT_BUT_NOT_READY",
+});
+
+/** 安全验证的 outcome（与 availability 正交，只由明确文案证明）。 */
+export const ZXGK_VERIFICATION_OUTCOMES = Object.freeze({
+  UNKNOWN: "UNKNOWN",
+  UNVERIFIED: "UNVERIFIED",
+  REJECTED_OR_EXPIRED: "REJECTED_OR_EXPIRED",
+  VERIFIED_OR_QUERYING: "VERIFIED_OR_QUERYING",
+});
 
 export const ZXGK_INPUT_POLICY = Object.freeze({
   entityName: true,
@@ -125,6 +184,18 @@ export function fillEntityExpression(entityName) {
   })()`;
 }
 
+/**
+ * 提交查询（点击页面自己的「查询」按钮）。
+ *
+ * M8.2b Slice 4B 复核的真实页面事实：该按钮绑定 `submitCaptcha()`，
+ * 而 `submitCaptcha(){ initCurrentPage(); search(); }`，`initCurrentPage()` 会把
+ * `#currentPage` 归位为 1。因此**每次提交查询都必然从第 1 页开始**，页面里遗留的
+ * `#currentPage = 2` 不会被带到新的查询里（fresh resume 依赖这一条事实）。
+ * 这也意味着 fresh resume 不需要额外重置分页输入框。
+ *
+ * 注意：分页控件的「上一页/下一页/尾页」按钮只改页码后调用 `search()`，
+ * 它们**不**调用 `initCurrentPage()`——本 adapter 因此从不使用它们。
+ */
 export function submitQueryExpression() {
   return String.raw`(() => {
     ${sharedDomHelpers}
@@ -345,6 +416,140 @@ export function resultRowsExpression() {
       },
     };
   })()`;
+}
+
+/**
+ * 读取安全验证组件的可观察事实（M8.2b Slice 4B）。
+ *
+ * 只读 DOM 与 computed style，不做任何分类、不写状态、不发动作、不触碰 token：
+ * 分类一律交给 Node 侧的 classifyVerificationAvailability /
+ * classifyVerificationOutcome 完成，避免页面侧与 Node 侧各写一套判定。
+ *
+ * 弹窗未打开时 overlay / parent / root 都不存在，这是**预期事实**，不是错误：
+ * NOT_PRESENT 既可能表示「还没打开验证码」，也可能表示「验证已通过、弹窗已移除」。
+ */
+export function verificationAvailabilityExpression() {
+  const selectors = ZXGK_VERIFICATION_SELECTORS;
+  return String.raw`(() => {
+    ${sharedDomHelpers}
+    const VERIFICATION_FAILURE_PATTERN = new RegExp(${JSON.stringify(
+      ZXGK_VERIFICATION_FAILURE_PATTERN.source,
+    )});
+    const selector = ${JSON.stringify(selectors)};
+    const pick = (value) => {
+      try {
+        return document.querySelector(value);
+      } catch {
+        return null;
+      }
+    };
+    // 可见性必须基于 computed style 与几何：加载文案是伪元素，innerText 读不到。
+    const widgetVisible = (element) => {
+      if (!element) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        Number(style.opacity) > 0.01 &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    };
+    let failureEvidence = null;
+    for (const node of Array.from(document.querySelectorAll(".warning-result"))) {
+      const value = text(node.innerText || node.textContent || "");
+      if (VERIFICATION_FAILURE_PATTERN.test(value)) {
+        failureEvidence = value;
+        break;
+      }
+    }
+    const loading = pick(selector.loading);
+    const status = pick(selector.status);
+    return {
+      ok: true,
+      overlayPresent: Boolean(pick(selector.overlay)),
+      parentPresent: Boolean(pick(selector.parent)),
+      loadingPresent: Boolean(loading),
+      loadingVisible: widgetVisible(loading),
+      rootPresent: Boolean(pick(selector.root)),
+      statusText: status ? text(status.innerText || status.textContent || "") : null,
+      failureEvidence,
+    };
+  })()`;
+}
+
+/** 页面事实的轻量归一：只统一全角/半角与空白，不改写文案内容。 */
+function normalizeVerificationText(value) {
+  return String(value ?? "")
+    .normalize("NFKC")
+    .replace(/\s+/g, "");
+}
+
+/**
+ * 纯判定：安全验证当前处于哪一种 outcome。
+ *
+ * 与 availability 正交，且**只由明确文案证明**：
+ * - REJECTED_OR_EXPIRED：页面自己写下验证失败/失效文案（结果区提示或状态胶囊）；
+ * - VERIFIED_OR_QUERYING：页面自己宣布验证已通过；
+ * - UNVERIFIED：组件仍在页面上，但没有通过也没有失败；
+ * - UNKNOWN：什么证据都没有（例如弹窗已移除且状态为空）。
+ *
+ * NOT_PRESENT 有多重业务含义，因此缺证据时一律 UNKNOWN，绝不推断成"未验证"。
+ */
+export function classifyVerificationOutcome(facts) {
+  const evidence = normalizeVerificationText(facts?.failureEvidence);
+  if (evidence && ZXGK_VERIFICATION_FAILURE_PATTERN.test(evidence))
+    return ZXGK_VERIFICATION_OUTCOMES.REJECTED_OR_EXPIRED;
+  const status = normalizeVerificationText(facts?.statusText);
+  if (status && ZXGK_VERIFICATION_FAILURE_PATTERN.test(status))
+    return ZXGK_VERIFICATION_OUTCOMES.REJECTED_OR_EXPIRED;
+  if (status && ZXGK_VERIFICATION_QUERYING_PATTERN.test(status))
+    return ZXGK_VERIFICATION_OUTCOMES.VERIFIED_OR_QUERYING;
+  if (facts?.overlayPresent || facts?.parentPresent)
+    return ZXGK_VERIFICATION_OUTCOMES.UNVERIFIED;
+  return ZXGK_VERIFICATION_OUTCOMES.UNKNOWN;
+}
+
+/**
+ * 纯判定：安全验证组件当前的 availability。
+ *
+ * 判定顺序（只看开关型信号，不看文案、不看随机 id、不看滑块按钮）：
+ * 1. overlay 或 parent 缺失 → NOT_PRESENT；
+ * 2. root 存在且 loading 不可见 → READY；
+ * 3. loading 可见且 root 不存在 → LOADING；
+ * 4. 其余（含「root 与 loading 同时可见」这种矛盾事实）→ PRESENT_BUT_NOT_READY。
+ *
+ * 读取失败不会被猜成任何一种状态：返回 ok:false，由调用方 fail closed。
+ */
+export function classifyVerificationAvailability(facts) {
+  if (!facts || facts.ok !== true)
+    return {
+      ok: false,
+      state: null,
+      outcome: ZXGK_VERIFICATION_OUTCOMES.UNKNOWN,
+      error: "无法读取安全验证组件的页面事实。",
+    };
+  const outcome = classifyVerificationOutcome(facts);
+  if (!facts.overlayPresent || !facts.parentPresent)
+    return {
+      ok: true,
+      state: ZXGK_VERIFICATION_WIDGET_STATES.NOT_PRESENT,
+      outcome,
+    };
+  if (facts.rootPresent && !facts.loadingVisible)
+    return { ok: true, state: ZXGK_VERIFICATION_WIDGET_STATES.READY, outcome };
+  if (facts.loadingVisible && !facts.rootPresent)
+    return {
+      ok: true,
+      state: ZXGK_VERIFICATION_WIDGET_STATES.LOADING,
+      outcome,
+    };
+  return {
+    ok: true,
+    state: ZXGK_VERIFICATION_WIDGET_STATES.PRESENT_BUT_NOT_READY,
+    outcome,
+  };
 }
 
 /**

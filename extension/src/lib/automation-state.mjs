@@ -120,25 +120,131 @@ export function canStartNewAutomation(job) {
 }
 
 /**
- * 本轮第一页核查是否还有可继续的进度。
- *
- * 与 canStartNewAutomation 的区别是语义：这里有未完成的第一页进度，
- * 正确动作是「继续本次核查」（复用原 Query、跳过已完成的列表与详情），
- * 而不是从第 1 条重新开始。
- *
- * 只允许第 1 页：当前没有「跨页 fresh resume」的安全路径（它需要重建查询环境并
- * 重新完成人工验证后跳页），对第 2 页起给出「继续本次核查」只会得到一个必然失败的
- * 动作，因此这里直接按页坐标收窄（legacy job 由 normalize 派生为第 1 页）。
+ * checkpoint identity 已经失效的错误码：这些状态下再「继续本次核查」只会重复同一个
+ * 失败（结果集或页数已经变了），因此必须 fail closed 到手工模式，而不是给用户一个
+ * 必然失败的动作。临时性故障（读不到页面、跳页超时、验证组件未就绪）不在其中。
  */
-export function canResumeFirstPage(job) {
-  return (
-    [AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(job?.state) &&
-    job?.result === AUTOMATION_RESULT.HAS_RESULT &&
-    Boolean(job?.queryId) &&
-    normalizeAutomationJob(job).currentPage === FIRST_PAGE_NO &&
-    Array.isArray(job?.pageOneRowKeys) &&
-    job.pageOneRowKeys.length > 0
-  );
+export const AUTOMATION_CHECKPOINT_INVALID_CODES = Object.freeze([
+  "TOTAL_PAGES_CHANGED",
+  "RESUME_PAGE_MISMATCH",
+  "RESUME_BOUNDARY_MISSING",
+  "RESUME_BOUNDARY_CHANGED",
+  "RESUME_FROZEN_SET_CHANGED",
+  "ADVANCE_WRONG_PAGE",
+  "ADVANCE_ROWS_INVALID",
+]);
+
+/**
+ * 纯推导：未完成核查应该回到第几页。
+ *
+ * 只读 normalizeAutomationJob 的兼容视图，不 mutate、不读写 storage、不发网络请求，
+ * 也刻意不看 automation state（调用方在任何 saveState 之前调用它）。
+ *
+ * 本轮的恢复范围严格限定在 Slice 3B 的两页边界内：
+ * - 第 1 页（含“已处理完、但还没离开这一页”）→ 目标第 1 页：恢复后必须先在页面上重新
+ *   证明第 1 页仍然是同一份结果集，再交给 driver 决定是否继续往后处理；
+ * - 第 2 页已冻结且尚未完整处理 → 目标第 2 页。
+ *
+ * 绝不推导 currentPage + 1，也绝不返回第 3 页：任何超出两页范围的 checkpoint 都
+ * 判为不可恢复，交人工。
+ */
+export function deriveResumeTarget(job) {
+  const normalized = normalizeAutomationJob(job);
+  if (!normalized || typeof normalized !== "object")
+    return { ok: false, reason: "没有可继续的自动核查进度。" };
+  const { currentPage, totalPages } = normalized;
+  const pages = Array.isArray(normalized.completedPages)
+    ? normalized.completedPages
+    : [];
+  const keys = Array.isArray(normalized.pageFrozenKeys)
+    ? normalized.pageFrozenKeys
+    : [];
+
+  if (totalPages != null && (!Number.isInteger(totalPages) || totalPages < 1))
+    return {
+      ok: false,
+      reason: "结果总页数不是合法值，无法确认恢复目标。",
+    };
+  if (!Number.isInteger(currentPage) || currentPage < 1)
+    return {
+      ok: false,
+      reason: "本次核查没有可用的当前页坐标，无法确认恢复目标。",
+    };
+  if (totalPages != null && currentPage > totalPages)
+    return { ok: false, reason: "当前页坐标已经越界，无法确认恢复目标。" };
+
+  if (currentPage === FIRST_PAGE_NO) {
+    // 第 1 页：必须有冻结结果集合（boundary 指纹的来源），且 completedPages 不能
+    // 出现超出第 1 页的记录。**第 1 页是否已经处理完不影响目标页**：完成页的推进
+    // 属于 driver 的两页边界，state 层只负责把核查带回第 1 页。
+    if (!keys.length)
+      return {
+        ok: false,
+        reason: "第 1 页还没有冻结的结果集合，无法安全恢复。",
+      };
+    if (pages.length > FIRST_PAGE_NO)
+      return { ok: false, reason: "第 1 页的完成记录与页坐标不一致。" };
+    return {
+      ok: true,
+      targetPage: FIRST_PAGE_NO,
+    };
+  }
+
+  if (currentPage === FIRST_PAGE_NO + 1) {
+    // 第 2 页：只有"第 1 页已完成、第 2 页已冻结、baseline 明确"的 checkpoint
+    // 才可恢复——恢复第 2 页必须重新跳页并用 baseline 判定到达。
+    if (!Number.isInteger(totalPages))
+      return {
+        ok: false,
+        reason: "恢复第 2 页需要明确的结果总页数 baseline，无法安全恢复。",
+      };
+    if (!keys.length)
+      return {
+        ok: false,
+        reason: "第 2 页还没有冻结的结果集合，无法安全恢复。",
+      };
+    if (pages.length !== FIRST_PAGE_NO)
+      return {
+        ok: false,
+        reason: "第 2 页的完成进度与页坐标不一致，无法安全恢复。",
+      };
+    return {
+      ok: true,
+      targetPage: FIRST_PAGE_NO + 1,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "本轮只支持恢复到第 1 页或第 2 页，无法安全恢复。",
+  };
+}
+
+/**
+ * 未完成的核查是否还有可继续的进度（M8.2b Slice 4B 泛化）。
+ *
+ * 与 canStartNewAutomation 的区别是语义：这里有 checkpoint，正确动作是
+ * 「继续本次核查」（复用原 Query、跳过已完成的列表与详情；第 2 页的 checkpoint
+ * 则先重建查询环境并重新完成人工验证，再回到第 2 页），而不是从第 1 条重新开始。
+ *
+ * 以下都不提供「继续本次核查」：
+ * - 不在 PAUSED / FAILED（运行中、已结算态都没有可继续的动作）；
+ * - 没有结果（NO_RESULT / UNKNOWN 没有页级 checkpoint）；
+ * - 缺少 queryId；
+ * - 页模型不足以推导恢复目标（含第 3 页及以后：本轮没有安全的恢复路径）；
+ * - checkpoint identity 已经失效（结果集 / 页数已经变化）：此时 resume 必然重复
+ *   同一个失败，必须交人工。
+ */
+export function canResumeAutomation(job) {
+  if (
+    ![AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(job?.state)
+  )
+    return false;
+  if (AUTOMATION_CHECKPOINT_INVALID_CODES.includes(job?.errorCode))
+    return false;
+  if (job?.result !== AUTOMATION_RESULT.HAS_RESULT) return false;
+  if (!String(job?.queryId || "").trim()) return false;
+  return deriveResumeTarget(job).ok;
 }
 
 /**

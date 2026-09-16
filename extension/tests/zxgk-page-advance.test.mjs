@@ -384,7 +384,7 @@ test("C. totalPages 变化（22 / 20 / null）一律 PAUSED，进度保留且只
 // D. 跳页后落在错误的页：fail closed，不纠正、不重发
 // ---------------------------------------------------------------------------
 
-test("D. 跳页后停在错误的页 → PAUSED(PAGE_ADVANCE_WRONG_PAGE)，不重发", async () => {
+test("D. 跳页后停在错误的页 → PAUSED(ADVANCE_WRONG_PAGE)，不重发", async () => {
   const { state, adapter, workflow } = await modules();
   const job = completePageJob(state, adapter);
   const run = advanceHarness(workflow, state, adapter, job, {
@@ -398,7 +398,7 @@ test("D. 跳页后停在错误的页 → PAUSED(PAGE_ADVANCE_WRONG_PAGE)，不�
 
   const paused = run.savedJobs.at(-1);
   assert.equal(paused.state, state.AUTOMATION_STATES.PAUSED);
-  assert.equal(paused.errorCode, "PAGE_ADVANCE_WRONG_PAGE");
+  assert.equal(paused.errorCode, "ADVANCE_WRONG_PAGE");
   assert.equal(paused.currentPage, 1);
   assert.equal(run.jumpCalls().length, 1);
   assert.match(paused.error, /不会再次发出跳页动作/);
@@ -620,7 +620,7 @@ test("G. settlePendingPageAdvance：落在别的页 / 总页数变化 / 目标�
 
   const wrong = workflow.settlePendingPageAdvance(job, pageSnapshot(3, 21));
   assert.equal(wrong.outcome, "FAILED");
-  assert.equal(wrong.code, "PAGE_ADVANCE_WRONG_PAGE");
+  assert.equal(wrong.code, "ADVANCE_WRONG_PAGE");
 
   const changed = workflow.settlePendingPageAdvance(job, pageSnapshot(2, 22));
   assert.equal(changed.outcome, "FAILED");
@@ -634,7 +634,7 @@ test("G. settlePendingPageAdvance：落在别的页 / 总页数变化 / 目标�
     pageSnapshot(2, 21, duplicated),
   );
   assert.equal(invalid.outcome, "FAILED");
-  assert.equal(invalid.code, "PAGE_ADVANCE_ROWS_INVALID");
+  assert.equal(invalid.code, "ADVANCE_ROWS_INVALID");
 });
 
 test("G. settlePendingPageAdvance：没有 pending 时不得凭空判定", async () => {
@@ -801,7 +801,10 @@ test("I. 每个 transition 只发一次跳页动作，且没有任何生产路�
   assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
   // advancePage：1 次定义 + 1 次调用（M8.2b Slice 3B 的两页 driver 里唯一的一次）。
   // 调用点只有一处，因此一次执行不可能翻两次页，结构上也不可能进入第 3 页。
-  assert.equal((workflow.match(/advancePage\(/g) || []).length, 2);
+  // advancePage：1 次定义 + 2 次调用。两个调用点分属互斥路径
+  // （全新核查的 runPageRun 与「继续本次核查」的 finishResumedFirstPage），
+  // 一次执行仍然最多推进一页；state 层不持有任何分页语义。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 3);
   const continueBody = workflow.slice(
     workflow.indexOf("async function continueAfterVerification"),
     workflow.indexOf(

@@ -680,8 +680,10 @@ test("Slice 3B：两页 driver 只有一次 advancePage 调用点，且没有任
 
   // 一次 transition 最多发出一次跳页动作：dispatch 调用点有且只有一个。
   assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
-  // advancePage：1 次定义 + 1 次调用（两页 driver 里唯一的一次）。
-  assert.equal((workflow.match(/advancePage\(/g) || []).length, 2);
+  // advancePage：1 次定义 + 2 次调用，两个调用点分属互斥的路径
+  // （全新核查的 runPageRun 与「继续本次核查」的 finishResumedFirstPage），
+  // 因此一次执行仍然最多推进一页；driver 切片内部只有唯一一次调用（见下）。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 3);
 
   // 两页 driver 内部：恰好一次 advancePage，且没有 for / while 分页循环，
   // 也没有任何"本轮允许跑几页"的运行期上限。
@@ -697,7 +699,7 @@ test("Slice 3B：两页 driver 只有一次 advancePage 调用点，且没有任
   // 终态函数自己不翻页：第 2 页循环之后直接落到 DONE / PARTIAL_COMPLETE 然后 return。
   const finishBody = workflow.slice(
     workflow.indexOf("async function finishPageRun"),
-    workflow.indexOf("async function resumeFirstPage"),
+    workflow.indexOf("async function readPageOrNull"),
   );
   assert.ok(finishBody.length > 0);
   assert.doesNotMatch(finishBody, /advancePage|jumpToPage|ADVANCING_PAGE/);

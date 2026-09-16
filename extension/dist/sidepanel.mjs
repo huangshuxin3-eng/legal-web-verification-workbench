@@ -209,23 +209,33 @@ const automationLabels = {
   [AUTOMATION_STATES.DONE]: "查询与留痕已完成",
 };
 /**
- * 未完成的核查（当前只有第 1 页会给出「继续本次核查」）：显示真实进度，
- * 并把它作为主要动作。继续沿用同一个 Query 与同一份已完成留痕，
- * 不会从第 1 条重新开始。
+ * 未完成的核查（第 1 页或第 2 页的 checkpoint）：显示真实进度，并把它作为主要动作。
+ * 继续沿用同一个 Query 与同一份已完成留痕，不会从第 1 条重新开始。
+ *
+ * 第 2 页的 checkpoint 会先重新建立查询页面并重新完成安全验证，然后跳回第 2 页，
+ * 因此文案必须说清"会重新验证"，而不是让用户以为点一下就能接着跑。
  */
 function unfinishedProgressLines(view) {
   const pageNo = view.currentPage ?? 1;
-  const lines = [
-    "本次核查未完成",
+  const lines = ["本次核查未完成"];
+  if (view.completedPageCount > 0)
+    lines.push(
+      `✓ 已完成第 1–${view.completedPageCount} 页（网站共 ${view.totalPages ?? "未知"} 页）`,
+    );
+  lines.push(
     view.listCaptureComplete
       ? `✓ 第 ${pageNo} 页列表：已留痕`
       : `◦ 第 ${pageNo} 页列表：待留痕`,
-    `详情：${view.completedDetailCount} / ${view.expectedDetailCount}`,
+    `第 ${pageNo} 页详情：${view.completedDetailCount} / ${view.expectedDetailCount}`,
     `已生成留痕：${view.generatedCaptureCount}`,
-  ];
+  );
   if (view.nextIncompleteCaseNo)
     lines.push(`下一项：${view.nextIncompleteCaseNo}`);
-  lines.push("继续本次核查将从下一个未完成项开始，不会重复已完成的留痕。");
+  lines.push(
+    pageNo > 1
+      ? "继续本次核查会重新建立查询页面、重新完成安全验证，然后跳回该页从下一个未完成项开始，不会重复已完成的留痕。"
+      : "继续本次核查将从下一个未完成项开始，不会重复已完成的留痕。",
+  );
   return lines;
 }
 function renderAutomation() {

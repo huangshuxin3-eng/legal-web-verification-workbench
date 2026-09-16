@@ -2,7 +2,8 @@ import { caseNoFromRowKey } from "../adapters/zxgk-execution.mjs";
 import {
   AUTOMATION_STATES,
   canRecheckAutomation,
-  canResumeFirstPage,
+  canResumeAutomation,
+  deriveResumeTarget,
   hasListCapture,
   normalizeAutomationJob,
 } from "./automation-state.mjs";
@@ -39,6 +40,7 @@ export function deriveZxgkAutomationProgressViewModel(job) {
   const listCaptureComplete = hasListCapture(normalized);
   const nextRowKey = rowKeys.find((key) => !completedKeys.includes(key));
   const pendingOperation = normalized?.currentOperation || null;
+  const resumeTarget = deriveResumeTarget(normalized);
 
   return {
     // 页坐标：当前页处理的都是"当前页"的集合与进度。
@@ -59,7 +61,9 @@ export function deriveZxgkAutomationProgressViewModel(job) {
     waitingForHumanVerification:
       job?.state === AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
     canContinue: canRecheckAutomation(job),
-    canResume: canResumeFirstPage(job),
+    // 可继续的 checkpoint 不再限于第 1 页，但恢复目标只可能是第 1 / 第 2 页。
+    canResume: canResumeAutomation(job),
+    resumeTargetPage: resumeTarget.ok ? resumeTarget.targetPage : null,
     currentPageProcessing: currentPageProcessingStates.has(job?.state),
     firstPageComplete: job?.state === AUTOMATION_STATES.FIRST_PAGE_COMPLETE,
     partialComplete: job?.state === AUTOMATION_STATES.PARTIAL_COMPLETE,

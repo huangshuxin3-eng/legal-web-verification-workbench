@@ -4,12 +4,14 @@ import {
   AUTOMATION_STATES,
   FIRST_PAGE_NO,
   canRecheckAutomation,
-  canResumeFirstPage,
+  canResumeAutomation,
+  deriveResumeTarget,
   hasListCapture,
   normalizeAutomationJob,
 } from "./automation-state.mjs";
 import {
   buildRowKey,
+  classifyVerificationAvailability,
   evaluateDetailIdentity,
   freezePageRows,
   isZxgkExecutionPage,
@@ -18,6 +20,8 @@ import {
   reconcileRowKeys,
   supportsZxgkExecution,
   ZXGK_EXECUTION_ADAPTER,
+  ZXGK_VERIFICATION_OUTCOMES,
+  ZXGK_VERIFICATION_WIDGET_STATES,
 } from "../adapters/zxgk-execution.mjs";
 import { normalizeQueryText, selectCanonicalQuery } from "./query-identity.mjs";
 
@@ -30,6 +34,33 @@ export const AUTOMATION_QUERY_UNAVAILABLE_MESSAGE =
 
 export const AUTOMATION_JOB_INVALID_MESSAGE =
   "本次核查的恢复状态不完整或不一致，无法安全继续。已生成留痕不会删除。";
+
+export const AUTOMATION_RESUME_UNAVAILABLE_MESSAGE =
+  "当前没有可继续的核查进度，请重新开始自动核查。";
+
+/**
+ * 安全验证组件的观察上限（M8.2b Slice 4B）。
+ *
+ * 真人正常样本约 1.0s / 1.0s / 16.2s，取 45s 作为观察上限。
+ *
+ * 语义严格限定为「观察了 45 秒仍然没有进入可人工操作的 READY 状态」，
+ * **不是**「网站已证明加载失败」：真实页面没有任何"验证组件加载失败"的 DOM 证据，
+ * 因此对外文案只能说"长时间未就绪"，不得断言加载失败或接口故障。
+ */
+export const VERIFICATION_WIDGET_READY_DEADLINE_MS = 45000;
+const VERIFICATION_WIDGET_POLL_MS = 500;
+
+export const VERIFICATION_WIDGET_UNAVAILABLE_CODE =
+  "VERIFICATION_WIDGET_UNAVAILABLE";
+export const VERIFICATION_WIDGET_NOT_OBSERVED_CODE =
+  "VERIFICATION_WIDGET_NOT_OBSERVED";
+
+/** 本轮 fresh resume 只允许把第 1 页恢复到第 2 页，绝不泛化到任意后续页。 */
+const RESUMABLE_SECOND_PAGE_NO = FIRST_PAGE_NO + 1;
+
+/** 有界观察循环的安全上限：即使注入的时钟不前进也一定会结束。 */
+const boundedPolls = (deadlineMs, pollMs) =>
+  Math.max(1, Math.ceil(deadlineMs / pollMs) + 2);
 
 const operationTypes = new Set(["LIST", "DETAIL", "PAGE_ADVANCE"]);
 const operationPhases = new Set(Object.values(AUTOMATION_PHASES));
@@ -253,16 +284,67 @@ const advanceFailed = (code, error, sourcePage, targetPage) => ({
 });
 
 /**
- * pending PAGE_ADVANCE 的纯判定（same-environment settle）。
+ * 纯判定：跳页动作发出之后，页面事实是否已经证明"到达目标页"。
  *
- * 只根据真实页面快照回答“这次跳页现在算不算达成”，不发动作、不写状态：
- * - 页面明确报告验证失败 → FAILED(PAGE_ADVANCE_REQUIRES_VERIFICATION)；
+ * 只使用页坐标、结果总页数与目标页结果集合这几项直接事实，不发动作、不写状态：
  * - 已到达目标页且结果总页数仍是 baseline → SETTLED（附目标页冻结集合）；
  * - 仍停在源页或页信号不完整 → PENDING（继续观察，绝不重发动作）；
  * - 明确停在别的页 → FAILED；结果总页数变化 → FAILED；目标页不可冻结 → FAILED。
  *
- * “验证失败”只能由页面自己的证据证明（snapshot.verification），绝不由读取异常推断；
- * 快照缺失或被判定为不可读时，这里一律返回 PENDING，绝不凭空给出结论。
+ * 刻意不判断"验证失败"：那必须由页面自己的文案证明，属于调用方的职责。
+ * same-environment 的 settlePendingPageAdvance 与 fresh resume 的重新跳页共用这一份
+ * 判定，避免两处各写一套页坐标规则。
+ */
+export function classifyPageArrival(
+  snapshot,
+  { sourcePage, targetPage, baseline },
+) {
+  const page = snapshot?.page || {};
+  if (page.input === targetPage && page.shown === targetPage) {
+    // 到达目标页还不够：结果总页数与 baseline 不一致时结果集可能已经变化。
+    if (page.totalPages !== baseline)
+      return {
+        outcome: "FAILED",
+        code: "TOTAL_PAGES_CHANGED",
+        error: `结果总页数已从 ${baseline} 变为 ${page.totalPages ?? "未知"}，本次自动核查已暂停，请人工核对后再决定是否重新核查。`,
+      };
+    const frozen = freezePageRows(snapshot, targetPage);
+    if (!frozen.ok)
+      return {
+        outcome: "FAILED",
+        code: "ADVANCE_ROWS_INVALID",
+        error: frozen.error,
+      };
+    return { outcome: "SETTLED", rows: frozen.rows, keys: frozen.keys };
+  }
+
+  // 仍停在源页：请求可能还在飞行，也可能动作没有生效，一律继续观察到 deadline。
+  if (page.input === sourcePage && page.shown === sourcePage)
+    return { outcome: "PENDING" };
+
+  // 已明确落在另一个页：不纠正、不重发，直接 fail closed。
+  if (Number.isInteger(page.input) && page.input === page.shown)
+    return {
+      outcome: "FAILED",
+      code: "ADVANCE_WRONG_PAGE",
+      error: `跳页后页面停在第 ${page.input} 页，不是第 ${targetPage} 页，本次自动核查已暂停（不会再次发出跳页动作）。`,
+    };
+
+  // 页信号不完整（飞行中）：既不算到达，也不算失败。
+  return { outcome: "PENDING" };
+}
+
+/**
+ * pending PAGE_ADVANCE 的纯判定（same-environment settle）。
+ *
+ * 只根据真实页面快照回答"这次跳页现在算不算达成"，不发动作、不写状态。
+ * 到达 / 待定 / 失败的全部页坐标规则由 classifyPageArrival 提供，这里只补两件事：
+ * - 页面明确报告验证失败必须先于页坐标判定（验证失效时页坐标可能仍残留源页的值，
+ *   pager 是被隐藏而不是被清空）；
+ * - 结果里带上源页 / 目标页，便于上层写 PAUSED 时保留诊断信息。
+ *
+ * "验证失败"只能由页面自己的证据证明（snapshot.verification），绝不由读取异常推断；
+ * 快照缺失或被判定为不可读时一律 PENDING，绝不凭空给出结论。
  * 真正的 fresh resume（重建查询环境后重新验证）不属于这里。
  */
 export function settlePendingPageAdvance(job, snapshot) {
@@ -277,10 +359,7 @@ export function settlePendingPageAdvance(job, snapshot) {
   const sourcePage = pending.pageNo;
   const targetPage = pending.targetPage;
   const baseline = normalizeAutomationJob(job).totalPages;
-  const page = snapshot?.page || {};
 
-  // 页面自己把验证失败的提示写进结果区，才算“验证失效”被证明。它必须先于页坐标
-  // 判定：验证失效时页坐标可能仍残留着源页的值（pager 被隐藏而不是被清空）。
   if (snapshot?.verification?.failed === true)
     return advanceFailed(
       "PAGE_ADVANCE_REQUIRES_VERIFICATION",
@@ -289,47 +368,12 @@ export function settlePendingPageAdvance(job, snapshot) {
       targetPage,
     );
 
-  if (page.input === targetPage && page.shown === targetPage) {
-    // 到达目标页还不够：结果总页数与 baseline 不一致时结果集可能已经变化。
-    if (page.totalPages !== baseline)
-      return advanceFailed(
-        "TOTAL_PAGES_CHANGED",
-        `结果总页数已从 ${baseline} 变为 ${page.totalPages ?? "未知"}，本次自动核查已暂停，请人工核对后再决定是否重新核查。`,
-        sourcePage,
-        targetPage,
-      );
-    const frozen = freezePageRows(snapshot, targetPage);
-    if (!frozen.ok)
-      return advanceFailed(
-        "PAGE_ADVANCE_ROWS_INVALID",
-        frozen.error,
-        sourcePage,
-        targetPage,
-      );
-    return {
-      outcome: "SETTLED",
-      sourcePage,
-      targetPage,
-      rows: frozen.rows,
-      keys: frozen.keys,
-    };
-  }
-
-  // 仍停在源页：请求可能还在飞行，也可能动作没有生效，一律继续观察到 deadline。
-  if (page.input === sourcePage && page.shown === sourcePage)
-    return { outcome: "PENDING", sourcePage, targetPage };
-
-  // 已明确落在另一个页：不纠正、不重发，直接 fail closed。
-  if (Number.isInteger(page.input) && page.input === page.shown)
-    return advanceFailed(
-      "PAGE_ADVANCE_WRONG_PAGE",
-      `跳页后页面停在第 ${page.input} 页，不是第 ${targetPage} 页，本次自动核查已暂停（不会再次发出跳页动作）。`,
-      sourcePage,
-      targetPage,
-    );
-
-  // 页信号不完整（飞行中）：既不算到达，也不算失败。
-  return { outcome: "PENDING", sourcePage, targetPage };
+  const decision = classifyPageArrival(snapshot, {
+    sourcePage,
+    targetPage,
+    baseline,
+  });
+  return { ...decision, sourcePage, targetPage };
 }
 
 /**
@@ -675,6 +719,96 @@ export function createZxgkAutomation(dependencies) {
     });
   }
 
+  /**
+   * 提交查询之后的有界观察（M8.2b Slice 4B）。
+   *
+   * 只有真的观察到安全验证组件进入可人工操作状态（READY），才把这一步交给人工；
+   * 否则按**真实观察到的事实** fail closed。它不判断"网站坏了"：
+   * - LOADING / PRESENT_BUT_NOT_READY 持续到 deadline
+   *     → PAUSED + VERIFICATION_WIDGET_UNAVAILABLE（文案只说"长时间未就绪"）；
+   * - NOT_PRESENT 持续到 deadline（真人证明它有多重业务含义）
+   *     → PAUSED + VERIFICATION_WIDGET_NOT_OBSERVED（更泛化的文案，不伪造 widget 证据）。
+   *
+   * Phase A 只回答"新的安全验证组件是否已经进入可人工操作状态"，因此**不消费
+   * verification outcome**：真人页面证明上一轮的"验证已失效"文案可以在新组件正常
+   * LOADING → READY 的整个过程中继续留在页面上。把这种陈旧 outcome 当作 PAUSE 依据，
+   * 会让一个本来可以正常验证的页面被误判。45 秒 deadline 也只针对"组件没有进入
+   * READY"，不针对旧的 verification outcome。
+   *
+   * "本次人工验证没有被网站接受"由 continueAfterVerification（Phase B）重新读取
+   * 页面事实后判定——那时页面上的失效文案才是本次验证的证据。
+   *
+   * 读取失败与"还没就绪"同样处理：继续观察到 deadline，绝不据此推断原因。
+   * 有界：总时长不超过 deadline，并且有一个与 deadline 对应的轮询上限，
+   * 因此即使注入的时钟不前进也一定会结束，不存在无限 retry。
+   */
+  async function awaitVerificationWidget(
+    job,
+    deadlineMs = VERIFICATION_WIDGET_READY_DEADLINE_MS,
+  ) {
+    if (typeof dependencies.readVerificationAvailability !== "function")
+      throw new Error("缺少安全验证组件的观察依赖，未提交查询。");
+    if (typeof dependencies.sleep !== "function")
+      throw new Error("缺少等待依赖，未提交查询。");
+    const deadline = dependencies.now().getTime() + deadlineMs;
+    const maxPolls = boundedPolls(deadlineMs, VERIFICATION_WIDGET_POLL_MS);
+    let lastState = null;
+    for (let poll = 0; ; poll += 1) {
+      let facts = null;
+      try {
+        facts = await dependencies.readVerificationAvailability(job.tabId);
+      } catch {
+        // 读不到事实不等于"网站坏了"，也不等于"还没就绪"：只当这一轮没观测到。
+        facts = null;
+      }
+      const availability = classifyVerificationAvailability(facts);
+      if (
+        availability.ok &&
+        availability.state === ZXGK_VERIFICATION_WIDGET_STATES.READY
+      )
+        return saveState(job, AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION, {
+          error: null,
+          errorCode: null,
+        });
+      // Phase A 不读 outcome 判 PAUSE：真人页面证明旧的"验证已失效"文案可以在新的
+      // 组件正常 LOADING → READY 期间继续存在，因此这里只用它来判断"是否已经通过"。
+      // 页面自己宣布"验证已通过"：这一轮已经不需要人工再验证一次，
+      // 但仍然走同一个 WAITING_HUMAN_VERIFICATION 交接点，由用户决定何时继续。
+      if (
+        availability.outcome === ZXGK_VERIFICATION_OUTCOMES.VERIFIED_OR_QUERYING
+      )
+        return saveState(job, AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION, {
+          error: null,
+          errorCode: null,
+        });
+      if (availability.ok) lastState = availability.state;
+      if (poll + 1 >= maxPolls || dependencies.now().getTime() >= deadline)
+        break;
+      await dependencies.sleep(VERIFICATION_WIDGET_POLL_MS);
+    }
+    const seconds = Math.round(deadlineMs / 1000);
+    if (lastState === ZXGK_VERIFICATION_WIDGET_STATES.NOT_PRESENT)
+      return saveState(job, AUTOMATION_STATES.PAUSED, {
+        errorCode: VERIFICATION_WIDGET_NOT_OBSERVED_CODE,
+        error: `点击查询后 ${seconds} 秒内没有在页面上观察到安全验证组件，无法确认页面是否已进入可人工验证状态。请重新建立页面后再试。`,
+      });
+    return saveState(job, AUTOMATION_STATES.PAUSED, {
+      errorCode: VERIFICATION_WIDGET_UNAVAILABLE_CODE,
+      error: `安全验证长时间未就绪（已观察 ${seconds} 秒），页面没有报告加载失败。请重新建立页面后再试。`,
+    });
+  }
+
+  /**
+   * 全新的一轮自动核查。
+   *
+   * 前端行为：`openQueryPage(..., { force: true })` 会让 worker **重新加载**查询入口，
+   * 而不是在已经停在入口的标签页上直接复用。真实页面事实支持这么做：安全验证的令牌
+   * 与弹窗状态全部是内存态，只有真正重新加载才能得到「从零开始」的验证环境，
+   * 也才能让下面的安全验证观察有确定含义。
+   *
+   * 提交查询后必须先真的观察到安全验证组件进入可操作状态（awaitVerificationWidget）
+   * 才把这一步交给人工；否则按观察到的事实 PAUSED，绝不假装已进入人工验证。
+   */
   async function start({ taskId, projectId }) {
     let job = {
       adapter: ZXGK_EXECUTION_ADAPTER,
@@ -729,7 +863,7 @@ export function createZxgkAutomation(dependencies) {
         firstPageComplete: null,
         errorCode: null,
       });
-      await dependencies.openQueryPage(tab.id, tab.url);
+      await dependencies.openQueryPage(tab.id, tab.url, { force: true });
       job = await saveState(job, AUTOMATION_STATES.FILLING_ENTITY);
       const filled = await dependencies.fillEntity(tab.id, job.queryText);
       if (!filled?.ok)
@@ -738,17 +872,25 @@ export function createZxgkAutomation(dependencies) {
       const submitted = await dependencies.submitQuery(tab.id);
       if (!submitted?.ok)
         throw new Error(submitted?.error || "查询按钮点击失败。");
-      return saveState(job, AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION);
+      // 提交成功还不等于"可以交给人工"：必须先真的观察到安全验证组件进入可操作状态。
+      return awaitVerificationWidget(job);
     } catch (error) {
       return fail(error.job || job, error);
     }
   }
 
   /**
-   * 继续本次核查：同一个 automationJob / run、同一个 Query、同一个 queryId。
-   * 只重新建立网页执行环境并重新查询，不改动已有的 Query 与 Capture。
+   * 继续本次核查（M8.2b Slice 4B：fresh environment）。
+   *
+   * 同一个 automationJob / run、同一个 Query、同一个 queryId。原自动化标签页仍在就
+   * 复用，已经不在就新建一个专用标签页（绝不导航用户当前活动标签页），然后在其中
+   * **重建**查询环境并重新提交查询。
+   *
+   * 重建之后页面必然回到第 1 页（页面事实：查询按钮绑定 submitCaptcha()，它会先
+   * initCurrentPage() 再 search()），因此第 2 页的 checkpoint 会在人工验证之后由
+   * resumeCheckpoint 重新跳到第 2 页，而不是在这里猜旧环境停在哪一页。
+   *
    * 开始前必须确认本轮 Query 仍然有效（存在、同 Task、同检索词），否则 fail closed。
-   * 原自动化标签页已关闭时新建一个并在其中重建环境，不导航用户当前活动标签页。
    */
   async function resume({ taskId }) {
     let job = await dependencies.getJob();
@@ -758,8 +900,8 @@ export function createZxgkAutomation(dependencies) {
       const invariant = validateZxgkAutomationJobInvariant(job);
       if (!invariant.ok)
         throw new Error(`${AUTOMATION_JOB_INVALID_MESSAGE}（${invariant.code}）`);
-      if (!canResumeFirstPage(job))
-        throw new Error("当前没有可继续的第一页核查进度，请重新开始自动核查。");
+      if (!canResumeAutomation(job))
+        throw new Error(AUTOMATION_RESUME_UNAVAILABLE_MESSAGE);
       if (taskId !== job.taskId)
         throw new Error("当前选择的 Task 已变化，本次自动核查已停止。");
       const task = await dependencies.getTask(job.taskId);
@@ -786,7 +928,7 @@ export function createZxgkAutomation(dependencies) {
       job = await saveState(job, AUTOMATION_STATES.OPENING_QUERY_PAGE, {
         tabId: tab.id,
       });
-      await dependencies.openQueryPage(tab.id, tab.url);
+      await dependencies.openQueryPage(tab.id, tab.url, { force: true });
       job = await saveState(job, AUTOMATION_STATES.FILLING_ENTITY);
       const filled = await dependencies.fillEntity(tab.id, job.queryText);
       if (!filled?.ok)
@@ -795,7 +937,7 @@ export function createZxgkAutomation(dependencies) {
       const submitted = await dependencies.submitQuery(tab.id);
       if (!submitted?.ok)
         throw new Error(submitted?.error || "查询按钮点击失败。");
-      return saveState(job, AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION);
+      return awaitVerificationWidget(job);
     } catch (error) {
       return fail(error.job || job, error);
     }
@@ -902,10 +1044,17 @@ export function createZxgkAutomation(dependencies) {
   /**
    * 收尾上一轮遗留的操作：凡是留痕已经真实生成（currentOperation 带
    * captureId）的，只补记进度；没有成功留痕的只做清理，稍后按 rowKey 重试。
+   *
+   * PAGE_ADVANCE 是有意例外：它没有任何可以"补记"的本地证据，旧环境里的
+   * dispatch 结果也不可信。因此这里只做清理，绝不把"跳页意图"当成"跳页已成功"。
+   * - same environment：由 settlePendingPageAdvance 用真实页面事实证明；
+   * - fresh environment：由恢复流程在重新证明源页之后重新发出一次跳页。
    */
   async function settlePendingOperation(job, pending) {
     if (!pending) return job;
     if (pending.type === "LIST") return settlePendingListCapture(job, pending);
+    if (pending.type === "PAGE_ADVANCE")
+      return saveState(job, job.state, { currentOperation: null });
     if (pending.captureId && pending.rowKey)
       return settlePendingCapture(job, pending);
     if (pending.detailTabId) await releaseDetailTab(job, pending.detailTabId);
@@ -1099,15 +1248,9 @@ export function createZxgkAutomation(dependencies) {
       },
     });
 
-    // STEP 3 — 只发出一次动作。
-    let dispatched;
-    try {
-      dispatched = await dependencies.jumpToPage(job.tabId, targetPage);
-    } catch (error) {
-      throw stop(job, messageOf(error));
-    }
-    if (!dispatched?.ok)
-      throw stop(job, dispatched?.error || "跳页动作未能发出。");
+    // STEP 3 — 只发出一次动作。唯一的网站 dispatch 调用点在 dispatchJumpToPage。
+    const dispatched = await dispatchJumpToPage(job.tabId, targetPage);
+    if (!dispatched.ok) throw stop(job, dispatched.error);
 
     // STEP 4/5 — 只认页面事实；到期仍没有确定结论就 fail closed，绝不重发。
     const deadline = dependencies.now().getTime() + PAGE_ADVANCE_TIMEOUT_MS;
@@ -1166,6 +1309,29 @@ export function createZxgkAutomation(dependencies) {
         );
       }
       await dependencies.sleep(PAGE_ADVANCE_POLL_MS);
+    }
+  }
+
+  /**
+   * 唯一的跳页 dispatch 调用点（M8.2b Slice 4B）。
+   *
+   * 全新核查的 1 → 2 transition 与「继续本次核查」的第 2 页重建都只经过这里，
+   * 因此全文件只有一处 dependencies.jumpToPage：一次执行最多发出一次网站动作，
+   * 结构上不存在“两次动作导致多翻一页”的可能。
+   *
+   * 依赖缺失与动作抛出都只转成结果对象，由调用方按自己的 job 语义 fail closed：
+   * 绝不在这里重试，也绝不把“没发出去”当成“已经发出去”。
+   */
+  async function dispatchJumpToPage(tabId, targetPage) {
+    if (typeof dependencies.jumpToPage !== "function")
+      return { ok: false, error: "缺少跳页动作依赖，未发出跳页动作。" };
+    try {
+      const dispatched = await dependencies.jumpToPage(tabId, targetPage);
+      if (!dispatched?.ok)
+        return { ok: false, error: dispatched?.error || "跳页动作未能发出。" };
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: messageOf(error) };
     }
   }
 
@@ -1299,36 +1465,312 @@ export function createZxgkAutomation(dependencies) {
     );
   }
 
+  /** 只读一页快照：读取失败按"读不到"处理，由调用方 fail closed。 */
+  async function readPageOrNull(tabId) {
+    try {
+      const snapshot = await dependencies.readResultPage(tabId);
+      return snapshot?.ok === true ? snapshot : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
-   * 继续第一页：重新查询后，当前第 1 页集合必须与原冻结集合完全一致
-   * （顺序可变），然后跳过已完成的列表与详情，从第一个未完成 rowKey 继续。
+   * 页面能否证明它仍然是某一个已知的结果页（same environment 的最小判据）。
+   *
+   * 只认页坐标与结果总页数。**有意不使用** resultVisible / pagerVisible /
+   * rows.length：真人在"验证已失效"时观察到 resultVisible=true（旧结果仍在 DOM 里），
+   * 因此它们不能作为环境可信的判据；结果集身份的一致性由 reconcileFrozenSet 负责。
    */
-  async function resumeFirstPage(job) {
-    const pending = job.currentOperation || null;
-    job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS);
-    const snapshot = await dependencies.readResultPage(job.tabId);
-    const reconciled = reconcileFrozenSet(
-      job.pageOneRowKeys,
-      snapshot,
-      FIRST_PAGE_NO,
+  function pageFactsMatch(snapshot, pageNo, baseline) {
+    const page = snapshot?.page || {};
+    return (
+      page.input === pageNo &&
+      page.shown === pageNo &&
+      page.totalPages === baseline
     );
-    if (!reconciled.ok) throw stop(job, reconciled.error);
-    // 这里刻意不清空 currentOperation：先补记上一轮已经成功的留痕，再收尾。
-    // 否则会在“补记”之前多出一个新的中断窗口，反而可能重复留痕。
+  }
+
+  /**
+   * fresh resume 的第 1 页证明（M8.2b Slice 4B）。
+   *
+   * 三条都必须成立，任何一条不成立都 fail closed：
+   * 1. 页面坐标严格是第 1 页；
+   * 2. 页面自报总页数等于 persisted baseline（增 / 减 / 缺失都不接受，
+   *    **绝不**接受新的 baseline）；
+   * 3. 第 1 页结果集合必须与 pageOneRowKeys 完全一致（boundary fingerprint）。
+   *
+   * pageOneRowKeys 在这里只被当作第 1 页的 boundary 指纹消费：它不参与第 2 页的
+   * 列表留痕、详情进度或冻结集合判定（第 2 页在 normalize 视图里是惰性陈旧数据），
+   * 也绝不因为页面变化而被改写。
+   */
+  function proveFirstPage(job, snapshot) {
+    const baseline = normalizeAutomationJob(job).totalPages;
+    if (!Number.isInteger(baseline) || baseline < 1)
+      return {
+        ok: false,
+        code: "RESUME_BOUNDARY_MISSING",
+        reason:
+          "本次核查没有可用的结果总页数 baseline，无法确认结果集未发生变化。",
+      };
+    const page = snapshot?.page || {};
+    if (page.input !== FIRST_PAGE_NO || page.shown !== FIRST_PAGE_NO)
+      return {
+        ok: false,
+        code: "RESUME_PAGE_MISMATCH",
+        reason: `页面不是结果第 ${FIRST_PAGE_NO} 页（页面显示第 ${page.shown ?? "未知"} 页），无法安全恢复本次核查。`,
+      };
+    if (page.totalPages !== baseline)
+      return {
+        ok: false,
+        code: "TOTAL_PAGES_CHANGED",
+        reason: `结果总页数已从 ${baseline} 变为 ${page.totalPages ?? "未知"}，本次核查的检查点已经失效，请人工核对后重新核查。`,
+      };
+    const fingerprint = Array.isArray(job.pageOneRowKeys)
+      ? job.pageOneRowKeys
+      : null;
+    if (!fingerprint || !fingerprint.length)
+      return {
+        ok: false,
+        code: "RESUME_BOUNDARY_MISSING",
+        reason: "本次核查缺少第 1 页的结果边界记录，无法确认结果集未发生变化。",
+      };
+    const reconciled = reconcileFrozenSet(fingerprint, snapshot, FIRST_PAGE_NO);
+    if (!reconciled.ok)
+      return {
+        ok: false,
+        code: "RESUME_BOUNDARY_CHANGED",
+        reason: reconciled.error,
+      };
+    return { ok: true, rows: reconciled.rows };
+  }
+
+  /**
+   * 「继续本次核查」处理完第 1 页之后的终态（M8.2b Slice 4B）。
+   *
+   * - 网站只有第 1 页：保持 M8.2a 的 FIRST_PAGE_COMPLETE 终态，不引入新的分页语义；
+   * - 网站还有后续页：补做 Slice 3B 的 1 → 2 transition（advancePage 内部只发一次
+   *   跳页动作），然后由 finishPageRun 决定 DONE / PARTIAL_COMPLETE。
+   *
+   * 绝不泛化到 currentPage + 1 的通用分页：这里唯一的推进动作就是 advancePage。
+   */
+  async function finishResumedFirstPage(job) {
+    const normalized = normalizeAutomationJob(job);
+    if (
+      Number.isInteger(normalized.totalPages) &&
+      normalized.currentPage >= normalized.totalPages
+    )
+      return firstPageCompleteness(job);
+    job = await advancePage(job);
+    const nextRows = normalizeAutomationJob(job).currentPageRows;
+    return finishPageRun(await runCurrentPageLoop(job, nextRows));
+  }
+
+  /**
+   * fresh resume 的「重新跳到第 2 页」（M8.2b Slice 4B）。
+   *
+   * 前置：已经在重建出来的第 1 页上通过了 proveFirstPage。
+   *
+   * 旧环境里的跳页 dispatch 结果不可信，因此这里**重新发出恰好一次**跳页动作，
+   * 再用真实页面事实确认到达（与 same environment 共用 classifyPageArrival）。
+   * 到达之后，第 2 页的冻结集合必须与 persisted 完全一致：第 2 页的列表留痕与
+   * 已完成详情都据此跳过，绝不重写历史 fingerprint，也绝不重复生成证据。
+   *
+   * 目标页写死为本轮唯一允许的第二页，不做任何通用后续页推导。
+   */
+  async function restoreSecondPage(job, baseline) {
+    const persisted = normalizeAutomationJob(job);
+    if (persisted.currentPage !== RESUMABLE_SECOND_PAGE_NO)
+      throw stop(
+        job,
+        `本轮只支持把第 ${FIRST_PAGE_NO} 页恢复到第 ${RESUMABLE_SECOND_PAGE_NO} 页，已停止自动核查。`,
+      );
+    if (
+      typeof dependencies.jumpToPage !== "function" ||
+      typeof dependencies.sleep !== "function"
+    )
+      throw stop(job, "缺少跳页动作依赖，未发出跳页动作。");
+    const lockedKeys = persisted.pageFrozenKeys;
+    if (!Array.isArray(lockedKeys) || !lockedKeys.length)
+      throw stop(job, "第 2 页缺少已冻结的结果集合，无法安全恢复。");
+
+    // STEP 1 — 只发出一次跳页动作。唯一的网站 dispatch 调用点在 dispatchJumpToPage。
+    const dispatched = await dispatchJumpToPage(
+      job.tabId,
+      RESUMABLE_SECOND_PAGE_NO,
+    );
+    if (!dispatched.ok) throw stop(job, dispatched.error);
+
+    // STEP 2 — 只认页面事实；到期仍没有确定结论就 fail closed，绝不重发。
+    const deadline = dependencies.now().getTime() + PAGE_ADVANCE_TIMEOUT_MS;
+    const maxPolls = boundedPolls(
+      PAGE_ADVANCE_TIMEOUT_MS,
+      PAGE_ADVANCE_POLL_MS,
+    );
+    for (let poll = 0; ; poll += 1) {
+      const snapshot = await readPageOrNull(job.tabId);
+      if (!snapshot)
+        throw await pauseWith(
+          job,
+          "PAGE_ADVANCE_READ_FAILED",
+          "跳页后无法确认结果页面状态，已暂停自动核查。",
+        );
+      const decision = classifyPageArrival(snapshot, {
+        sourcePage: FIRST_PAGE_NO,
+        targetPage: RESUMABLE_SECOND_PAGE_NO,
+        baseline,
+      });
+      if (decision.outcome === "SETTLED") {
+        const reconciled = reconcileFrozenSet(
+          lockedKeys,
+          snapshot,
+          RESUMABLE_SECOND_PAGE_NO,
+        );
+        if (!reconciled.ok)
+          throw await pauseWith(
+            job,
+            "RESUME_FROZEN_SET_CHANGED",
+            reconciled.error,
+          );
+        job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
+          error: null,
+          errorCode: null,
+          currentPage: RESUMABLE_SECOND_PAGE_NO,
+          totalPages: baseline,
+          resultPage: {
+            pageNo: RESUMABLE_SECOND_PAGE_NO,
+            totalPages: snapshot.page?.totalPages ?? null,
+            totalSize: snapshot.page?.totalSize ?? null,
+          },
+        });
+        return finishPageRun(await runCurrentPageLoop(job, reconciled.rows));
+      }
+      if (decision.outcome === "FAILED")
+        throw await pauseWith(job, decision.code, decision.error);
+      if (poll + 1 >= maxPolls || dependencies.now().getTime() >= deadline)
+        throw await pauseWith(
+          job,
+          "PAGE_ADVANCE_TIMEOUT",
+          `跳页后第 ${RESUMABLE_SECOND_PAGE_NO} 页在限定时间内没有出现，本次自动核查已暂停（不会再次发出跳页动作）。`,
+        );
+      await dependencies.sleep(PAGE_ADVANCE_POLL_MS);
+    }
+  }
+
+  /**
+   * 恢复已有 checkpoint 的本次核查（M8.2b Slice 4B）。
+   *
+   * 调用方已经保证：环境已重建、人工验证已完成、result === HAS_RESULT，
+   * 且 target 来自 deriveResumeTarget（因此只会是第 1 页或第 2 页）。
+   *
+   * 两条路径严格分开：
+   * - same environment：页面自己证明它仍然是 persisted 当前页（页坐标 + baseline +
+   *   已冻结集合全部一致）时，才允许在原环境上继续；
+   * - fresh environment：重建环境后页面必然回到第 1 页，因此必须先证明第 1 页，
+   *   再按 persisted 页坐标决定要不要重新跳到第 2 页。
+   *
+   * 任何关键事实不能证明都 fail closed：不猜页、不重写 fingerprint、不重复留痕。
+   */
+  async function resumeCheckpoint(job, target) {
+    const persisted = normalizeAutomationJob(job);
+    const baseline = persisted.totalPages;
+    const pending = job.currentOperation || null;
+
+    if (target.targetPage === RESUMABLE_SECOND_PAGE_NO) {
+      // same environment 快路径：页面自己证明它仍然是 persisted 的第 2 页。
+      const same = await readPageOrNull(job.tabId);
+      if (same && pageFactsMatch(same, RESUMABLE_SECOND_PAGE_NO, baseline)) {
+        const reconciled = reconcileFrozenSet(
+          persisted.pageFrozenKeys,
+          same,
+          RESUMABLE_SECOND_PAGE_NO,
+        );
+        if (!reconciled.ok)
+          throw await pauseWith(
+            job,
+            "RESUME_FROZEN_SET_CHANGED",
+            reconciled.error,
+          );
+        // 这里刻意不清空 currentOperation：先把上一轮已经成功的留痕补记完，
+        // 否则会在"补记"之前多出一个新的中断窗口，反而可能重复留痕。
+        job = await settlePendingOperation(job, pending);
+        return finishPageRun(await runCurrentPageLoop(job, reconciled.rows));
+      }
+    }
+
+    // Case B（只在 driver 层判定）：上一轮已经落盘“源页已完成、准备离开这一页”的意图，
+    // 但记录里的页坐标仍然停在源页。旧环境里的 dispatch 结果不可信，因此只认页面事实：
+    // - 真的到了目标页：注册表里本来就没有这一页的冻结集合，以真实事实就地冻结并继续；
+    // - 还停在源页：落到下面的第 1 页路径，重新证明后重新发出一次跳页；
+    // - 落在其它页 / 总页数已变化：fail closed。
+    const pendingTurn =
+      pending?.type === "PAGE_ADVANCE" &&
+      Number.isInteger(pending.targetPage) &&
+      pending.targetPage === RESUMABLE_SECOND_PAGE_NO
+        ? pending
+        : null;
+    if (pendingTurn) {
+      const arrived = await readPageOrNull(job.tabId);
+      if (arrived) {
+        const decision = classifyPageArrival(arrived, {
+          sourcePage: pendingTurn.pageNo,
+          targetPage: pendingTurn.targetPage,
+          baseline,
+        });
+        if (decision.outcome === "FAILED")
+          throw await pauseWith(job, decision.code, decision.error);
+        if (decision.outcome === "SETTLED") {
+          job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
+            error: null,
+            errorCode: null,
+            currentPage: RESUMABLE_SECOND_PAGE_NO,
+            totalPages: baseline,
+            resultPage: {
+              pageNo: RESUMABLE_SECOND_PAGE_NO,
+              totalPages: arrived.page?.totalPages ?? null,
+              totalSize: arrived.page?.totalSize ?? null,
+            },
+            pageFrozenKeys: decision.keys,
+            currentPageRows: decision.rows,
+            expectedDetailCount: decision.rows.length,
+            completedDetailKeys: [],
+            detailCaptures: [],
+            listCapture: null,
+            listFilename: null,
+            currentOperation: null,
+          });
+          return finishPageRun(await runCurrentPageLoop(job, decision.rows));
+        }
+      }
+    }
+
+    // fresh environment：必须在第 1 页上重新建立可信 checkpoint。
+    const firstSnapshot = await readPageOrNull(job.tabId);
+    if (!firstSnapshot)
+      throw await pauseWith(
+        job,
+        "RESUME_PAGE_UNREADABLE",
+        "无法读取综合查询结果页面，无法确认本次核查停在哪一页，已暂停自动核查。",
+      );
+    const proof = proveFirstPage(job, firstSnapshot);
+    if (!proof.ok) throw await pauseWith(job, proof.code, proof.reason);
+
+    if (target.targetPage === RESUMABLE_SECOND_PAGE_NO) {
+      job = await settlePendingOperation(job, pending);
+      return restoreSecondPage(job, baseline);
+    }
+
+    // 目标第 1 页：先补记已有的成功留痕，再处理当前页，最后决定终态。
     job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
       resultPage: {
         pageNo: FIRST_PAGE_NO,
-        totalPages: snapshot.page?.totalPages ?? null,
-        totalSize: snapshot.page?.totalSize ?? null,
+        totalPages: firstSnapshot.page?.totalPages ?? null,
+        totalSize: firstSnapshot.page?.totalSize ?? null,
       },
     });
-    // 上一轮若中断在“Capture 已成功、但尚未补记进度”的窗口，这里补记：
-    // 列表靠 captureId 直接补记 listCapture，详情靠 captureId 补记完成项。
     job = await settlePendingOperation(job, pending);
-    job = await runCurrentPageLoop(job, reconciled.rows);
-    // 「继续本次核查」仍然只处理第 1 页：它不接两页 driver，也绝不自动翻页。
-    // 跨页 fresh resume（重建查询环境、重新人工验证后再跳页）是独立切片，本轮不做。
-    return firstPageCompleteness(job);
+    job = await runCurrentPageLoop(job, proof.rows);
+    return finishResumedFirstPage(job);
   }
 
   async function continueAfterVerification({ taskId }) {
@@ -1346,8 +1788,32 @@ export function createZxgkAutomation(dependencies) {
       const task = await dependencies.getTask(job.taskId);
       if (!sameTaskContext(task, job))
         throw new Error("Task 内容或归属已经变化，本次自动核查已停止。");
+      // 恢复目标必须在任何 saveState 之前确定：写入会改变 state，而
+      // deriveResumeTarget 只读页模型（没有 checkpoint 时它也只返回 ok:false）。
+      const target = deriveResumeTarget(job);
       const tab = await dependencies.getTab(job.tabId);
-      if (!tab) throw new Error("自动核查标签页已关闭。");
+      // 标签页丢失 / 已经离开查询页时绝不猜页：交回「继续本次核查」重建页面。
+      if (!tab || !isZxgkExecutionPage(tab.url))
+        throw new Error(
+          "自动核查标签页已关闭或已离开综合查询页面，请使用「继续本次核查」重新建立页面。",
+        );
+      // Phase B（Slice 4B 修正 1）：用户已经点击「验证完成，继续」，因此此刻页面上的
+      // 失效文案才是"本次人工验证没有被网站接受"的证据。Phase A 里同样的文案可能只是
+      // 上一轮验证留下的陈旧状态，所以判定必须放在这里、而不是观察阶段。
+      // 读不到事实时不做任何推断：交给下面的结果判定按既有语义处理。
+      try {
+        const rejected = classifyVerificationAvailability(
+          await dependencies.readVerificationAvailability(job.tabId),
+        );
+        if (rejected.outcome === ZXGK_VERIFICATION_OUTCOMES.REJECTED_OR_EXPIRED)
+          return saveState(job, AUTOMATION_STATES.PAUSED, {
+            errorCode: "VERIFICATION_REQUIRED",
+            error:
+              "页面提示安全验证已失效，本次人工验证没有被网站接受。请在页面上重新完成安全验证，再点击「验证完成，继续」。",
+          });
+      } catch {
+        // 读失败不是"验证失败"的证据，继续走原有的结果判定。
+      }
       job = await saveState(job, AUTOMATION_STATES.CHECKING_RESULT);
       const result = await dependencies.inspectResult(job.tabId, tab.url);
       if (result === AUTOMATION_RESULT.UNKNOWN)
@@ -1362,9 +1828,10 @@ export function createZxgkAutomation(dependencies) {
       });
       job = await ensureQuery(job);
       if (result === AUTOMATION_RESULT.HAS_RESULT) {
-        // 已有第一页进度 = 继续本次核查；否则才是全新的核查（第 1 页 → 第 2 页）。
-        return job.pageOneRowKeys?.length
-          ? await resumeFirstPage(job)
+        // 有 checkpoint = 继续本次核查（复用原 Query 与已完成的留痕）；
+        // 否则才是全新的核查（第 1 页 → 第 2 页）。
+        return target.ok
+          ? await resumeCheckpoint(job, target)
           : await captureCurrentPage(job);
       }
       job = await saveState(job, AUTOMATION_STATES.CAPTURING_NO_RESULT);
