@@ -3,7 +3,7 @@
 > 项目：非诉网核工作台（Nonlit Workbench）  
 > 用途：跨对话 / 跨 Agent 的长期项目上下文与决策记录  
 > 最近更新：2026-09-15  
-> 当前正式 checkpoint：`6c74ed6 feat: complete milestone 8.2a first-page execution automation`
+> 当前正式 checkpoint：`f595d95 test: cover archive bridge contract`
 
 ---
 
@@ -214,6 +214,10 @@ f519303 feat: complete milestone 5 task workflow
 36731d8 feat: complete milestone 6 export and task usability
 71c3eea feat: complete milestone 8.1 semi-automated execution check
 6c74ed6 feat: complete milestone 8.2a first-page execution automation
+0d91f72 docs: add nonlit workbench project context
+55c6b20 refactor: validate zxgk automation recovery invariants
+5592764 refactor: centralize automation progress view model
+f595d95 test: cover archive bridge contract
 ```
 
 ---
@@ -797,28 +801,177 @@ Architecture Stabilization 时以此作为检查标准：
 
 ---
 
-## 20. Architecture Stabilization 目标
+## 20. Architecture Stabilization after M8.2a
 
-M8.2a 之后，先不开发新功能。
-
-做一次只读架构体检，再决定是否做小范围重构。
-
-重点检查：
-
-- 职责是否开始混在一起；
-- resume 逻辑是否散落；
-- sidepanel 是否拥有过多业务逻辑；
-- worker 是否开始知道太多 zxgk 业务；
-- adapter 是否仍只负责站点事实；
-- 状态是否由大量 scattered booleans 驱动；
-- Query / runtime run 是否混淆；
-- 第二个网站接入时是否需要修改太多公共文件；
-- 测试是否在 mock 中掩盖真实 worker/data 边界；
-- 哪些结构债现在值得收口，哪些只是“看起来不优雅”但不值得动。
-
-原则：
+M8.2a 完成后的 Architecture Stabilization Step 1～3 已完成。原则始终是：
 
 > 只减复杂度，不加产品功能。
+
+### Step 1：Runtime Job Invariant Validation ✅
+
+Commit：
+
+```text
+55c6b20 refactor: validate zxgk automation recovery invariants
+```
+
+目标是集中校验 persisted `automationJob` 的 runtime invariant。主要结果：
+
+- 在恢复已有 job 前执行 invariant validation；
+- 明显矛盾的 snapshot fail closed；
+- 不自动修复 snapshot，也不猜测缺失状态；
+- 不改变 persisted job shape；
+- 不改变 Query / Capture 语义；
+- 合法的 crash/recovery window 继续允许。
+
+必须允许的合法 recovery window：
+
+```text
+DETAIL：
+archive 成功
+→ currentOperation.captureId 已保存
+→ completedDetailKeys 尚未更新
+
+LIST：
+archive 成功
+→ LIST currentOperation.captureId 已保存
+→ listCapture 尚未 settle
+```
+
+Invariant validator 不得错误拦截以上状态。
+
+### Step 2：Side Panel Automation Progress View Model ✅
+
+Commit：
+
+```text
+5592764 refactor: centralize automation progress view model
+```
+
+新增：
+
+```text
+extension/src/lib/automation-progress-view.mjs
+```
+
+核心纯函数：
+
+```text
+deriveZxgkAutomationProgressViewModel(job)
+```
+
+职责是从 `automationJob` 纯派生 Side Panel 展示所需进度，包括：
+
+- `completedDetailCount`
+- `expectedDetailCount`
+- `listCaptureComplete`
+- `generatedCaptureCount`
+- `nextIncompleteCaseNo`
+- `pendingOperationCaseNo`
+- `waitingForHumanVerification`
+- `canContinue`
+- `canResume`
+- `firstPageProcessing`
+- `firstPageComplete`
+- `totalPages`
+- `errorShownInCard`
+
+Side Panel 不再自行：
+
+- 解析 rowKey；
+- 查找下一未完成案件；
+- 理解 LIST `captureId` recovery window；
+- 计算自动化进度事实。
+
+按钮事件、runtime message 和 state machine 均未改变。
+
+真人 UI smoke test 已通过：
+
+```text
+第 1 页已完整处理
+结果列表 1/1
+详情 10/10
+本页新增留痕 11
+网站结果页共 21 页
+后续分页暂未自动执行
+```
+
+### Step 3：Archive Bridge Contract Test ✅
+
+Commit：
+
+```text
+f595d95 test: cover archive bridge contract
+```
+
+新增：
+
+```text
+extension/src/lib/archive-bridge.mjs
+extension/tests/archive-bridge.test.mjs
+```
+
+目的：补上真实 archive bridge 的测试盲点。真实契约为：
+
+```text
+automation queryId
+→ worker archive
+→ Archive Bridge
+→ data.queryContext(queryId)
+→ Query / Task / Project context
+→ Capture API
+→ Capture record
+→ capture.id 返回 automation
+```
+
+Archive Bridge 不复制 M4 reservation/finalization/recovery 协议。验证结果：
+
+- `queryId` 真实进入 `data.queryContext`；
+- 错误 `queryId` 不再被万能 mock 掩盖；
+- `QUERY_NOT_ACCESSIBLE` 时 fail closed，不进入 Capture upload；
+- reservation/finalization 错误不被吞掉；
+- recovery 信息保持原样；
+- 成功时返回真实 `capture.id`。
+
+自动检查：
+
+```text
+Contract tests：6/6
+Extension tests：97/97
+typecheck：通过
+format check：通过
+git diff --check：通过
+```
+
+未运行会触发危险 build cleanup 的 Extension build；完整 Extension 测试直接使用：
+
+```text
+node --test extension/tests/*.test.mjs
+```
+
+真人归档 smoke test 已通过：
+
+- NO_RESULT 自动核查成功；
+- 生成 1 份 Capture；
+- Query 归属正确；
+- 文件名正确；
+- `capture_no` 正常继续递增；
+- 手工 Query 与自动 Query 语义仍然分离。
+
+### Stabilization 总结
+
+Architecture Stabilization Step 1～3 已完成。本轮没有实现或修改：
+
+- M8.2b 分页；
+- 第二网站；
+- Run 表；
+- worker driver 抽象；
+- generic plugin framework；
+- XState / Redux；
+- M4 exactly-once 重构；
+- Capture schema；
+- Query 语义；
+- canonical Query 规则。
 
 ---
 
@@ -839,7 +992,16 @@ M8.2a 之后，先不开发新功能。
 - `.dist-previous` build cleanup；
 - 大规模框架式重构。
 
-先完成 Architecture Stabilization，再决定进入 M8.2b。
+先完成完整 M8.2a 真人回归并建立 stabilization checkpoint，再设计 M8.2b。
+
+已知技术债继续保留，本轮均未处理：
+
+```text
+TD-001 archive finalize → saveState(captureId) 极窄 exactly-once 窗口
+TD-002 automation 使用中的 Query 仍可被 Workbench 删除
+TD-003 层级删除跨 Storage / PostgreSQL 非事务性
+TD-004 .dist-previous build cleanup safety blocker
+```
 
 ---
 
@@ -884,9 +1046,13 @@ M8.2a commit 前已完成：
 - staged 范围只包含 M8.2a 必要文件；
 - `git diff --cached --check` 通过。
 
-最终 commit：
+M8.2a 与 Architecture Stabilization 最新 checkpoint 序列：
 
 ```text
+f595d95 test: cover archive bridge contract
+5592764 refactor: centralize automation progress view model
+55c6b20 refactor: validate zxgk automation recovery invariants
+0d91f72 docs: add nonlit workbench project context
 6c74ed6 feat: complete milestone 8.2a first-page execution automation
 ```
 
@@ -894,21 +1060,14 @@ M8.2a commit 前已完成：
 
 ## 24. 下一步
 
-下一阶段：
-
-```text
-M8.2a Architecture Stabilization
-```
-
 执行顺序：
 
-1. Codex 只读架构审计；
-2. 输出职责边界、重复逻辑、耦合、扩展爆炸点；
-3. 给出“必须现在修 / 可延后 / 不要动”的分级；
-4. 用户确认后，才做最小范围重构；
-5. 重构完成并真人回归；
-6. 新 checkpoint；
-7. 再进入 M8.2b。
+```text
+Architecture Stabilization 完成
+→ 完整 M8.2a 真人回归
+→ 建立 stabilization checkpoint
+→ 再设计 M8.2b 分页
+```
 
 不要直接开始分页。
 
@@ -930,3 +1089,193 @@ M8.2a Architecture Stabilization
 长期开发原则：
 
 > 功能完成后先稳定，再继续扩展。
+
+---
+
+## 26. M8.2b Slice 0 — ZXGK Pagination Facts
+
+记录日期：2026-09-16。
+
+本节只记录**事实**，分两类，**不混写**：
+
+- **A. 源码级 CONFIRMED** —— 只读抓取真实 HTML / JS 得出；
+- **B. 真人 Chrome CONFIRMED** —— 真人操作确认。
+
+本节**不实现任何代码**。M8.2b 实现仍未开始；§21 暂缓事项中关于「M8.2b 分页 / 第 2 页及之后」的约束，对**实现**部分继续有效。
+
+### 26.1 事实来源与限制
+
+入口 `https://zxgk.court.gov.cn/zhzxgk/index.html`；`API_BASE = location.origin + '/gkw/zhcx'`；列表接口 `POST API_BASE + '/searchZhcx'`；详情接口 `POST API_BASE + '/detailZhcx'`。
+
+只读探测产物在 `C:\Users\黄舒心\zxgk-probe\`（**不在项目目录、未入库**）。
+
+> 无浏览器会话的直接 POST 探测受到 WAF 限制（cURL 直连返回 502）。真实运行验证应在 Chrome 会话中完成。
+
+因此：**分页契约**已从客户端 JS 完整读出；**运行时行为**以真人 Chrome 为准。
+
+### 26.2 A. 源码级 CONFIRMED
+
+#### A1. 分页 DOM selector
+
+分页控件位于 `#page-div`。稳定 selector：
+
+```text
+#first-btn
+#pre-btn
+#next-btn
+#last-btn
+#goto
+#currentPage          （<input type="hidden" name="currentPage">）
+#currentPage-show
+#totalPage-show
+#totalSize-show       （class="hide"，隐藏但 DOM 可读）
+```
+
+「下一页」= `#next-btn` + `onclick="nextPage()"`。
+
+#### A2. 分页实现
+
+`firstPage` / `prePage` / `nextPage` / `lastPage` / `goPage` 本质都是：**修改 `#currentPage` → 调用 `search()`**。
+
+注意 `nextPage()` 的输入是 `#currentPage`（**上次服务端回传值**）**加 1**，而不是从 `#currentPage-show` 读当前页。若该值陈旧或被意外改写，会跳错页。
+
+#### A3. AJAX fact
+
+`search()` → `serialize #zhcx-search-form` → `POST /gkw/zhcx/searchZhcx` → JSON；**无 URL navigation / full page navigation**，列表 Tab 从不被导航。即分页是**纯 AJAX POST**，不是 form submit。
+
+#### A4. direct jump fact
+
+**可靠 direct jump 能力存在。** 推荐未来 adapter primitive：
+
+```text
+1. 先校验：1 <= targetPage <= baselineTotalPages
+2. 设置 #currentPage = targetPage
+3. 调 search()
+4. 读取真实页面信号验证目标页
+```
+
+**尚未实现。**
+
+`goPage()` 存在**夹取逻辑**（输入 ≥ 总页数会被改成末页，静默改变目标页），因此实现**不依赖 `goPage()`**。绕开后失去网站自带越界保护 → **越界校验必须由 adapter / automation 自己承担**。
+
+#### A5. page update fact
+
+服务器响应 `success` callback 中**同步**更新：`currentPage-show` / `totalSize-show` / `totalPage-show` / `tbody`。
+
+真实结果行判据：**`#tbody-result a.View`**；**不足 10 条的 filler row 没有 `a.View`**。页内序号 `i + 1` 跨页必然重复，**不能作为身份**。
+
+#### A6. totalPages
+
+`#totalPage-show = Math.ceil(server totalSize / 10)`。页大小恒为 10，无 `pageSize` 参数；**每次 search / pagination 后都按服务端本次响应重新计算 totalPages**。
+
+#### A7. last page fact
+
+最后一页时 `#next-btn` **仍存在、仍可见，但 `disabled = true`**（`#last-btn` 同）。
+
+> `next disabled ≠ DONE`。
+
+DONE 仍必须依赖：所有页 `PAGE_COMPLETE` + `completedPages` 连续覆盖 + totalPages baseline 未变化 + no pending operation + last page completeness verified。
+
+#### A8. CAPTCHA facts
+
+每次 `search()` 都检查 verification token：**有效 → 正常 AJAX**；**失效 → 可能重新要求人工验证，且存在明确验证码失败 DOM**。
+
+禁止：`hardcode token TTL`；把验证码失败当作空结果页。
+
+#### A9. result-state facts
+
+`#pName` 结果态仍存在、可读；`#page-div` 有结果时可见，无结果或验证失败时可能隐藏。补充判据（可选）：无结果 / 验证失败时 `tbody` 会出现对应提示文案。
+
+#### A10. identity fact
+
+服务端 `result[i].id` 存在（写在 `a.View` 的 `id` 上），但 **不因发现 server id 而修改已锁定的 rowKey**：
+
+```text
+normalize(name) | normalize(caseNo) | normalize(filingDate)
+```
+
+### 26.3 B. 真人 Chrome CONFIRMED
+
+对象：中国执行信息公开网 · 恒大集团有限公司 · 真实结果页。
+
+#### B1. F-1 — Page 1 → Page 2 ✅
+
+```text
+before:                1 | 1 / 21 | rows = 10
+after one manual next: 2 | 2 / 21 | rows = 10
+```
+
+结论：**hidden currentPage / shown currentPage / rows 能够一致到达 Page 2。F-1 PASS。**
+
+#### B2. F-4 — last page ✅
+
+```text
+Page 21 / 21
+currentPage hidden = 21
+currentPage-show   = 21
+totalPages         = 21
+real rows          = 10
+next exists        = true
+next visible       = true
+next disabled      = true
+```
+
+**F-4 PASS。**
+
+重要：**末页可能有 1..10 个真实 rows**（本次第 21 页就是 10 条）。`PAGE_COMPLETE` 必须以真实 frozen row set 为准，**不得假设末页不足 10 条**。
+
+### 26.4 C. 本阶段不再做额外实验
+
+不做 token 过期时长实验，不做 `goPage()` 非法输入实验，不做翻页 WAF 频率实验。理由：correctness 不依赖 token TTL；M8.2b 自己严格校验 page range；频率问题留待后续真人 multi-page E2E 自然观察。
+
+### 26.5 D. fresh resume 到 Page N（锁定）
+
+```text
+重建查询
+→ CAPTCHA
+→ Page 1
+→ baseline totalPages verification
+→ direct jump Page N
+→ page signal verification
+→ current frozen-set reconciliation
+→ continue
+```
+
+**不要逐页 next。**
+
+### 26.6 E. page advance verification（锁定）
+
+```text
+success:
+  target page observed
+  + input / shown 一致
+  + rows 可读
+  + totalPages 与 baseline 一致
+
+wrong page           → fail closed
+captcha failure      → human / fail closed path
+source page 一直不变 → 等到 deadline → timeout
+```
+
+禁止：固定 sleep 后假设成功；minWait 后提前猜失败。
+
+### 26.7 设计基线（人工锁定，不得弱化）
+
+1. **totalPages 任何变化都 PAUSED。** baseline 建立后：`observed === baseline → continue`；`observed !== baseline → PAUSED`。增加 / 减少 / null **全部暂停**。**不采用 B+。**
+2. **`currentPage` / `completedPages` invariant 必须 state-sensitive。** 页内处理中 `currentPage` 不在 `completedPages`；`ADVANCING_PAGE` 时已在；`DONE` 时 `currentPage === totalPages` 且 `completedPages` 连续覆盖 `1..totalPages`。
+3. **same-environment pending `PAGE_ADVANCE` settle 与 fresh resume 必须分开。** 原环境仍在 → 可读真实 shown / input settle；真正 resume → 不得据旧 click 猜，必须重建查询环境后重新验证。
+4. **legacy Page 1 继续分页前先 reconcile。** 重查 Page 1 → 校验 totalPages → reconcile Page 1 frozen set → 才进入 Page 2。**不重新 Capture Page 1。**
+5. **`firstPageComplete` 可保留但新逻辑不依赖。** 可作 legacy marker 保留，DONE correctness 不依赖它，不主动删除。
+6. **historical pages 只存 summary。** 历史页只存 `completedPages` summary；当前页保存 `currentPageRows` + `pageFrozenKeys`。
+
+### 26.8 Slice 0 Exit Condition
+
+```text
+M8.2b Slice 0 ✅ COMPLETE
+源码探测完成。
+真人 F-1 ✅
+真人 F-4 ✅
+不存在阻塞 M8.2b 的网站事实。
+```
+
+下一步：**Slice 1 — Runtime Page Model + Invariant**（本轮未开始）。
