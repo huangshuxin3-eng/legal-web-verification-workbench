@@ -251,6 +251,8 @@ test("分页网站事实只存在于 adapter，orchestration 不持有任何网�
     "#currentPage-show",
     "#totalPage-show",
     "window.search",
+    // 验证失败提示同样是网站事实：只有 adapter 知道它长什么样。
+    ".warning-result",
   ])
     assert.ok(adapter.includes(owned), `adapter 应当拥有 ${owned}`);
   // 但绝不复用网站自带的分页控件函数：它们会把越界目标夹到末页。
@@ -263,6 +265,8 @@ test("分页网站事实只存在于 adapter，orchestration 不持有任何网�
     /#next-btn|#last-btn|#pre-btn|#goto/,
     /#currentPage|#totalPage-show|#totalSize-show/,
     /window\.search/,
+    /warning-result/,
+    /验证码错误|验证码已过期/,
   ];
   for (const source of [worker, workflow, state, progress, panel])
     for (const pattern of siteFacts)
@@ -272,9 +276,17 @@ test("分页网站事实只存在于 adapter，orchestration 不持有任何网�
         `${pattern} 不该出现在非 adapter 源码里`,
       );
 
-  // 本轮只暴露 primitive：orchestration 与 worker 都还没有接入跳页动作。
-  for (const source of [worker, workflow, state])
-    assert.doesNotMatch(source, /jumpToPage|navigateToPage/);
+  // Slice 3A 起 worker 只把 adapter 的 primitive 注入标签页（与其它 primitive 同一模式），
+  // orchestration 只消费注入的 jumpToPage。二者都不自己构造页面表达式。
+  assert.doesNotMatch(
+    workflow,
+    /jumpToPageExpression|navigateToPageExpression/,
+  );
+  assert.doesNotMatch(worker, /navigateToPageExpression/);
+  // state 层完全不知道“跳页”这件事。
+  assert.doesNotMatch(state, /jumpToPage/);
+  // 分页动作只能注入标签页执行，不得由 orchestration 直接驱动标签页。
+  assert.doesNotMatch(workflow, /evaluateInTab|chrome\.tabs\./);
 });
 
 // ---------------------------------------------------------------------------
@@ -328,4 +340,81 @@ test("兼容：validateFirstPage / freezePageOneRows 仍然是第 1 页入口", 
   assert.deepEqual(reconciled.rows, rowsOfPage(2));
   // 集合只要变化（这里换成另一页）就 fail closed。
   assert.equal(adapter.reconcileFrozenSet(keys, snapshotOf(3), 3).ok, false);
+});
+
+// ---------------------------------------------------------------------------
+// F. 验证失败信号：只认页面自己写进结果区的证据
+// ---------------------------------------------------------------------------
+
+/**
+ * 在极简假 DOM 里执行 resultRowsExpression。只需要它真正读到的几个面：
+ * 分页元素、结果区块、以及结果区里的提示节点。
+ */
+function runResultRows(expression, options = {}) {
+  const node = (overrides = {}) => ({
+    innerText: "",
+    textContent: "",
+    value: "",
+    classList: { contains: () => false },
+    ...overrides,
+  });
+  const warnings = (options.warnings || []).map((value) =>
+    node({ innerText: value, textContent: value }),
+  );
+  const elements = {
+    "#page-div": node(),
+    "#result-block": node(),
+    "#currentPage": node({ value: String(options.pageNo ?? 2) }),
+    "#currentPage-show": node({ textContent: String(options.pageNo ?? 2) }),
+    "#totalPage-show": node({ textContent: String(options.totalPages ?? 21) }),
+    "#totalSize-show": node({ textContent: String(options.totalSize ?? 210) }),
+  };
+  const document = {
+    querySelector: (selector) => elements[selector] ?? null,
+    querySelectorAll: (selector) =>
+      selector === ".warning-result" ? warnings : [],
+  };
+  return new Function("document", "window", `return ${expression};`)(
+    document,
+    {},
+  );
+}
+
+test("resultRowsExpression：验证失败只由页面自己的提示证明，其它提示不算证据", async () => {
+  const adapter = await loadSourceModule("adapters/zxgk-execution.mjs");
+  const expression = adapter.resultRowsExpression();
+
+  // 正常结果页：没有验证失败的证据，页坐标照常读取。
+  const normal = runResultRows(expression);
+  assert.deepEqual(normal.verification, { failed: false, evidence: null });
+  assert.equal(normal.ok, true);
+  assert.equal(normal.page.input, 2);
+  assert.equal(normal.page.shown, 2);
+  assert.equal(normal.page.totalPages, 21);
+
+  // 页面自己写下的验证失败提示 = 唯一可接受的证据，原文保留给诊断。
+  const failed = runResultRows(expression, {
+    warnings: ["验证码错误或验证码已过期。"],
+  });
+  assert.equal(failed.verification.failed, true);
+  assert.equal(failed.verification.evidence, "验证码错误或验证码已过期。");
+
+  // 结果区里的其它提示（含空节点）都不是证据：不得据此推断验证码问题。
+  for (const other of ["系统繁忙，请稍后再试。", "暂无数据", ""]) {
+    assert.deepEqual(
+      runResultRows(expression, { warnings: [other] }).verification,
+      { failed: false, evidence: null },
+      other,
+    );
+  }
+
+  // 判据只在 Node 侧定义一次，页面表达式注入的是同一份 pattern 源码。
+  assert.ok(adapter.ZXGK_VERIFICATION_FAILURE_PATTERN instanceof RegExp);
+  assert.ok(
+    expression.includes(
+      JSON.stringify(adapter.ZXGK_VERIFICATION_FAILURE_PATTERN.source),
+    ),
+  );
+  // 页面表达式只读取事实，不决定任何 orchestration 语义。
+  assert.doesNotMatch(expression, /PAUSED|REQUIRES_VERIFICATION|job\b/);
 });

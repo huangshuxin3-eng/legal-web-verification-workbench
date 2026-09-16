@@ -5,12 +5,14 @@ import {
   FIRST_PAGE_NO,
   canRecheckAutomation,
   canResumeFirstPage,
+  hasListCapture,
   normalizeAutomationJob,
 } from "./automation-state.mjs";
 import {
   buildRowKey,
   evaluateDetailIdentity,
   freezePageOneRows,
+  freezePageRows,
   isZxgkExecutionPage,
   locateRowKey,
   reconcileFrozenSet,
@@ -156,6 +158,186 @@ function validatePageModel(job) {
   }
 
   return null;
+}
+
+/** 跳页后的观察窗口与轮询间隔：只用于“长期没有确定结论就 fail closed”，不是成功判据。 */
+const PAGE_ADVANCE_TIMEOUT_MS = 20000;
+const PAGE_ADVANCE_POLL_MS = 250;
+
+/**
+ * 纯判定：第 pageNo 页是否已经可以证明 PAGE_COMPLETE。
+ *
+ * 只使用页坐标、冻结结果集合、详情完成集合与列表留痕这几项直接事实：
+ * - 不用“Capture 数量 === 11”这类计数代替集合覆盖；
+ * - 不用“分组控件是否禁用”；
+ * - 不用“是否打开过全部详情”。
+ *
+ * M8.2a 的第一页同样走这一份判定（legacy 字段由 normalize 派生为等价视图）。
+ */
+export function pageCompleteness(job, pageNo) {
+  const normalized = normalizeAutomationJob(job);
+  if (normalized.currentPage !== pageNo)
+    return {
+      ok: false,
+      reason: `当前页不是第 ${pageNo} 页，无法证明该页已完成。`,
+    };
+  const keys = normalized.pageFrozenKeys;
+  if (!Array.isArray(keys) || !keys.length)
+    return { ok: false, reason: `第 ${pageNo} 页没有冻结的结果集合。` };
+  if (new Set(keys).size !== keys.length)
+    return { ok: false, reason: `第 ${pageNo} 页的冻结结果集合存在重复。` };
+  if (job.expectedDetailCount !== keys.length)
+    return {
+      ok: false,
+      reason: `第 ${pageNo} 页的期望详情数与冻结结果集合不一致。`,
+    };
+  const completed = job.completedDetailKeys || [];
+  if (new Set(completed).size !== completed.length)
+    return { ok: false, reason: `第 ${pageNo} 页的详情完成进度存在重复。` };
+  const missing = keys.filter((key) => !completed.includes(key));
+  if (missing.length)
+    return {
+      ok: false,
+      reason: `第 ${pageNo} 页仍有未处理的结果：${missing.join("；")}。`,
+    };
+  if (!hasListCapture(job))
+    return { ok: false, reason: `第 ${pageNo} 页的结果列表尚未留痕。` };
+  if (job.currentOperation)
+    return { ok: false, reason: "仍有未结束的操作，未标记完成。" };
+  const resultPage = normalized.resultPage;
+  if (resultPage?.pageNo != null && resultPage.pageNo !== pageNo)
+    return { ok: false, reason: `最近一次读取的结果页不是第 ${pageNo} 页。` };
+  return { ok: true };
+}
+
+/** 跳页观察的失败结果：带上可区分的 code，由上层写入 PAUSED。 */
+const advanceFailed = (code, error, sourcePage, targetPage) => ({
+  outcome: "FAILED",
+  code,
+  error,
+  sourcePage,
+  targetPage,
+});
+
+/**
+ * pending PAGE_ADVANCE 的纯判定（same-environment settle）。
+ *
+ * 只根据真实页面快照回答“这次跳页现在算不算达成”，不发动作、不写状态：
+ * - 页面明确报告验证失败 → FAILED(PAGE_ADVANCE_REQUIRES_VERIFICATION)；
+ * - 已到达目标页且结果总页数仍是 baseline → SETTLED（附目标页冻结集合）；
+ * - 仍停在源页或页信号不完整 → PENDING（继续观察，绝不重发动作）；
+ * - 明确停在别的页 → FAILED；结果总页数变化 → FAILED；目标页不可冻结 → FAILED。
+ *
+ * “验证失败”只能由页面自己的证据证明（snapshot.verification），绝不由读取异常推断；
+ * 快照缺失或被判定为不可读时，这里一律返回 PENDING，绝不凭空给出结论。
+ * 真正的 fresh resume（重建查询环境后重新验证）不属于这里。
+ */
+export function settlePendingPageAdvance(job, snapshot) {
+  const pending = job?.currentOperation;
+  if (pending?.type !== "PAGE_ADVANCE")
+    return advanceFailed(
+      "NO_PAGE_ADVANCE_PENDING",
+      "当前没有待确认的跳页操作。",
+      null,
+      null,
+    );
+  const sourcePage = pending.pageNo;
+  const targetPage = pending.targetPage;
+  const baseline = normalizeAutomationJob(job).totalPages;
+  const page = snapshot?.page || {};
+
+  // 页面自己把验证失败的提示写进结果区，才算“验证失效”被证明。它必须先于页坐标
+  // 判定：验证失效时页坐标可能仍残留着源页的值（pager 被隐藏而不是被清空）。
+  if (snapshot?.verification?.failed === true)
+    return advanceFailed(
+      "PAGE_ADVANCE_REQUIRES_VERIFICATION",
+      `跳页后页面提示「${snapshot.verification.evidence || "安全验证失败"}」，需要在页面上重新完成安全验证，本次自动核查已暂停（不会再次发出跳页动作）。`,
+      sourcePage,
+      targetPage,
+    );
+
+  if (page.input === targetPage && page.shown === targetPage) {
+    // 到达目标页还不够：结果总页数与 baseline 不一致时结果集可能已经变化。
+    if (page.totalPages !== baseline)
+      return advanceFailed(
+        "TOTAL_PAGES_CHANGED",
+        `结果总页数已从 ${baseline} 变为 ${page.totalPages ?? "未知"}，本次自动核查已暂停，请人工核对后再决定是否重新核查。`,
+        sourcePage,
+        targetPage,
+      );
+    const frozen = freezePageRows(snapshot, targetPage);
+    if (!frozen.ok)
+      return advanceFailed(
+        "PAGE_ADVANCE_ROWS_INVALID",
+        frozen.error,
+        sourcePage,
+        targetPage,
+      );
+    return {
+      outcome: "SETTLED",
+      sourcePage,
+      targetPage,
+      rows: frozen.rows,
+      keys: frozen.keys,
+    };
+  }
+
+  // 仍停在源页：请求可能还在飞行，也可能动作没有生效，一律继续观察到 deadline。
+  if (page.input === sourcePage && page.shown === sourcePage)
+    return { outcome: "PENDING", sourcePage, targetPage };
+
+  // 已明确落在另一个页：不纠正、不重发，直接 fail closed。
+  if (Number.isInteger(page.input) && page.input === page.shown)
+    return advanceFailed(
+      "PAGE_ADVANCE_WRONG_PAGE",
+      `跳页后页面停在第 ${page.input} 页，不是第 ${targetPage} 页，本次自动核查已暂停（不会再次发出跳页动作）。`,
+      sourcePage,
+      targetPage,
+    );
+
+  // 页信号不完整（飞行中）：既不算到达，也不算失败。
+  return { outcome: "PENDING", sourcePage, targetPage };
+}
+
+/**
+ * advancePage 的前置条件：任何一项不成立都绝不发出网站动作，也不写任何状态。
+ * 传入的必须是 normalizeAutomationJob 之后的视图。
+ */
+function pageAdvancePreconditions(job) {
+  const { currentPage, totalPages } = job;
+  if (!Number.isInteger(currentPage) || currentPage < 1)
+    return "当前页坐标无效，未发出跳页动作。";
+  if (!Number.isInteger(totalPages) || totalPages < 1)
+    return "结果总页数尚未建立 baseline，未发出跳页动作。";
+  if (currentPage >= totalPages)
+    return `当前已是最后一页（第 ${currentPage} / ${totalPages} 页），没有可推进的页。`;
+  if (job.currentOperation) return "仍有未结算的操作，未发出跳页动作。";
+  const complete = pageCompleteness(job, currentPage);
+  if (!complete.ok) return complete.reason;
+  const pages = Array.isArray(job.completedPages) ? job.completedPages : [];
+  if (pages.some((item, index) => item?.pageNo !== index + 1))
+    return "已完成页记录必须从第 1 页起严格连续，未发出跳页动作。";
+  if (pages.length !== currentPage - 1 && pages.length !== currentPage)
+    return `第 ${currentPage} 页的完成记录与页坐标不一致，未发出跳页动作。`;
+  return null;
+}
+
+/** 已完成的当前页只记最小 summary：历史页不留 rows / rowKeys / detailCaptures。 */
+function pageCompleteSummary(job, normalized, pageNo, completedAt) {
+  const existing = Array.isArray(normalized.completedPages)
+    ? normalized.completedPages
+    : [];
+  // 已经记过这一页（legacy 完成标记派生，或幂等重入）时绝不重复 append。
+  if (existing.length === pageNo) return existing;
+  return [
+    ...existing,
+    {
+      pageNo,
+      detailCount: job.expectedDetailCount,
+      listCaptureId: job.listCapture?.id ?? null,
+      completedAt,
+    },
+  ];
 }
 
 /**
@@ -418,6 +600,18 @@ export function createZxgkAutomation(dependencies) {
     throw Object.assign(new Error(failed.error), { job: failed });
   };
 
+  /**
+   * 观察到的页面事实与 baseline 冲突：保留进度、置 PAUSED，并带上可区分的 code。
+   * 与 fail 的区别是语义：这里不是“执行失败”，而是“必须停下来交人工判断”。
+   */
+  const pauseWith = async (job, code, message) => {
+    const paused = await saveState(job, AUTOMATION_STATES.PAUSED, {
+      errorCode: code,
+      error: message,
+    });
+    return Object.assign(new Error(message), { job: paused });
+  };
+
   /** 当前 Task 内是否已经有同文本 Query 可以复用。 */
   async function findCanonicalQuery(taskId, queryText) {
     const rows = await dependencies.listTaskQueries(taskId);
@@ -489,6 +683,7 @@ export function createZxgkAutomation(dependencies) {
         listFilename: null,
         currentOperation: null,
         firstPageComplete: null,
+        errorCode: null,
       });
       await dependencies.openQueryPage(tab.id, tab.url);
       job = await saveState(job, AUTOMATION_STATES.FILLING_ENTITY);
@@ -773,24 +968,10 @@ export function createZxgkAutomation(dependencies) {
     });
   }
 
-  /** 第 1 页完成条件：列表 + N 个唯一详情 + 无残留操作。 */
+  /** 第 1 页完成条件：列表 + N 个唯一详情 + 无残留操作（与多页共用同一判定）。 */
   async function firstPageCompleteness(job) {
-    const completed = job.completedDetailKeys || [];
-    const unique = new Set(completed);
-    if (
-      completed.length !== job.expectedDetailCount ||
-      unique.size !== job.expectedDetailCount
-    )
-      throw stop(
-        job,
-        `第 1 页未完成：已处理 ${unique.size} / ${job.expectedDetailCount} 条详情。`,
-      );
-    const missing = (job.pageOneRowKeys || []).filter(
-      (key) => !unique.has(key),
-    );
-    if (missing.length)
-      throw stop(job, `第 1 页仍有未处理的结果：${missing.join("；")}。`);
-    if (job.currentOperation) throw stop(job, "仍有未结束的操作，未标记完成。");
+    const complete = pageCompleteness(job, FIRST_PAGE_NO);
+    if (!complete.ok) throw stop(job, complete.reason);
     // FIRST_PAGE_COMPLETE 不是 DONE：网站可能还有第 2 页及以后，本轮不翻页。
     return saveState(job, AUTOMATION_STATES.FIRST_PAGE_COMPLETE, {
       currentOperation: null,
@@ -802,6 +983,124 @@ export function createZxgkAutomation(dependencies) {
         newCaptures: job.expectedDetailCount + 1,
       },
     });
+  }
+
+  /**
+   * deterministic 的 Page N → Page N+1 协议（M8.2b Slice 3A）。
+   *
+   * 只推进一页：绝不循环、绝不自动重试，一次 transition 最多发出一次跳页动作。
+   * 是否到达只由页面事实决定——重新读取真实快照并双信号核对，primitive 的返回值
+   * 只表示“动作已发出”，从不被当作“已到达”。
+   */
+  async function advancePage(job) {
+    // STEP 1 — 前置条件：任何一项不成立都不发出网站动作，也不写任何状态。
+    const normalized = normalizeAutomationJob(job);
+    const sourcePage = normalized.currentPage;
+    const baseline = normalized.totalPages;
+    if (
+      typeof dependencies.jumpToPage !== "function" ||
+      typeof dependencies.sleep !== "function"
+    )
+      throw stop(job, "缺少跳页动作依赖，未发出跳页动作。");
+    const precondition = pageAdvancePreconditions(normalized);
+    if (precondition) throw stop(job, precondition);
+    const targetPage = sourcePage + 1;
+
+    // STEP 2 — 先落盘“当前页已完成、准备离开”，再产生任何网站副作用。
+    // 完成检查点与跳页 intent 必须在同一次原子写入里：只写一半的中间状态会同时违反
+    // 冻结集合与 completedPages 的 invariant。它与“目标页已到达”严格分开落盘。
+    job = await saveState(job, AUTOMATION_STATES.ADVANCING_PAGE, {
+      error: null,
+      errorCode: null,
+      // legacy 第一页完成标记交由 completedPages 接管，避免两者互相矛盾。
+      firstPageComplete: null,
+      currentPage: sourcePage,
+      totalPages: baseline,
+      pageFrozenKeys: normalized.pageFrozenKeys,
+      currentPageRows: normalized.currentPageRows,
+      completedPages: pageCompleteSummary(
+        job,
+        normalized,
+        sourcePage,
+        dependencies.now().toISOString(),
+      ),
+      currentOperation: {
+        type: "PAGE_ADVANCE",
+        pageNo: sourcePage,
+        targetPage,
+        attempt: 1,
+        phase: AUTOMATION_PHASES.LOCATING,
+      },
+    });
+
+    // STEP 3 — 只发出一次动作。
+    let dispatched;
+    try {
+      dispatched = await dependencies.jumpToPage(job.tabId, targetPage);
+    } catch (error) {
+      throw stop(job, messageOf(error));
+    }
+    if (!dispatched?.ok)
+      throw stop(job, dispatched?.error || "跳页动作未能发出。");
+
+    // STEP 4/5 — 只认页面事实；到期仍没有确定结论就 fail closed，绝不重发。
+    const deadline = dependencies.now().getTime() + PAGE_ADVANCE_TIMEOUT_MS;
+    for (;;) {
+      // 读取失败必须与“请求仍在飞行”严格区分：飞行中的真实表现是源页快照（旧 DOM
+      // 仍在，见 §26 A5 的 success callback 同步替换），而不是读取异常。异常可能来自
+      // 标签页被关闭、evaluate 失败、页面结构异常或依赖错误，无法据此证明是验证失效，
+      // 因此既不当 PENDING、也不猜成验证码问题，一律 fail closed 交人工，且绝不重发。
+      let snapshot;
+      try {
+        snapshot = await dependencies.readResultPage(job.tabId);
+      } catch (error) {
+        throw await pauseWith(
+          job,
+          "PAGE_ADVANCE_READ_FAILED",
+          `分页后无法确认结果页面状态，已暂停自动核查。（诊断：${messageOf(error)}）`,
+        );
+      }
+      if (!snapshot?.ok)
+        throw await pauseWith(
+          job,
+          "PAGE_ADVANCE_READ_FAILED",
+          "分页后无法确认结果页面状态，已暂停自动核查。（诊断：未读到结果页快照。）",
+        );
+      const decision = settlePendingPageAdvance(job, snapshot);
+      if (decision.outcome === "SETTLED")
+        return saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
+          error: null,
+          errorCode: null,
+          currentPage: targetPage,
+          totalPages: baseline,
+          resultPage: {
+            pageNo: targetPage,
+            totalPages: snapshot.page?.totalPages ?? null,
+            totalSize: snapshot.page?.totalSize ?? null,
+          },
+          // 目标页已冻结：历史页 summary 保留，当前页 rows / keys 换成目标页。
+          currentPageRows: decision.rows,
+          pageFrozenKeys: decision.keys,
+          expectedDetailCount: decision.keys.length,
+          completedDetailKeys: [],
+          detailCaptures: [],
+          listCapture: null,
+          listFilename: null,
+          currentOperation: null,
+        });
+      if (decision.outcome === "FAILED")
+        throw await pauseWith(job, decision.code, decision.error);
+      if (dependencies.now().getTime() >= deadline) {
+        // 走到这里一定是“页面一直可读、但目标页始终没有出现”（验证失效与读取失败
+        // 都已提前 fail closed），所以超时就是超时：不把“读不出结论”猜成验证码问题。
+        throw await pauseWith(
+          job,
+          "PAGE_ADVANCE_TIMEOUT",
+          `跳页后第 ${targetPage} 页在限定时间内没有出现，本次自动核查已暂停（不会再次发出跳页动作）。`,
+        );
+      }
+      await dependencies.sleep(PAGE_ADVANCE_POLL_MS);
+    }
   }
 
   /**
@@ -931,5 +1230,5 @@ export function createZxgkAutomation(dependencies) {
     }
   }
 
-  return { start, resume, continueAfterVerification };
+  return { start, resume, continueAfterVerification, advancePage };
 }

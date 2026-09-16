@@ -17,6 +17,7 @@ import {
   fillEntityExpression,
   isZxgkDetailPage,
   isZxgkExecutionPage,
+  jumpToPageExpression,
   openDetailExpression,
   resultRowsExpression,
   resultSnapshotExpression,
@@ -295,6 +296,17 @@ async function readResultPage(tabId) {
 }
 
 /**
+ * 发出跳页动作（M8.2b Slice 3A）。
+ *
+ * 只做一件事：把 adapter 生成的页面表达式注入标签页执行。它不判断是否到达、
+ * 不比较 totalPages baseline、不决定 PAUSED / DONE，也绝不重试。
+ */
+async function jumpToPage(tabId, targetPage) {
+  await checkedTab(tabId);
+  return evaluateInTab(tabId, jumpToPageExpression(targetPage));
+}
+
+/**
  * 点击“查看”。真实页面会 window.open("detail.html", "_blank") 打开新标签页，
  * 因此这里在点击前后对比标签页集合，等到新的详情标签页出现才继续。
  */
@@ -398,6 +410,8 @@ const automation = createZxgkAutomation({
     return classifyZxgkExecutionResult(snapshot);
   },
   readResultPage,
+  jumpToPage,
+  sleep,
   openDetail: openDetailTab,
   readDetailIdentity,
   closeDetail: closeDetailTab,

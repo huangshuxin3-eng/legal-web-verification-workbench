@@ -625,10 +625,10 @@ test("兼容：DETAIL 与 LIST 的合法 Capture recovery window 保持合法", 
 });
 
 // ---------------------------------------------------------------------------
-// H. Slice 1 边界：只建立 runtime model，不产生任何真实分页动作
+// H. Slice 3A 边界：确定性的单页跳转协议已就位，但没有生产路径自动翻页
 // ---------------------------------------------------------------------------
 
-test("Slice 1 不含任何真实分页动作，也没有生产路径进入 ADVANCING_PAGE", async () => {
+test("Slice 3A：单页跳转协议已就位，但仍没有生产路径自动翻页", async () => {
   const { state } = await modules();
   const [workflow, stateSource] = await Promise.all([
     readFile(
@@ -641,17 +641,27 @@ test("Slice 1 不含任何真实分页动作，也没有生产路径进入 ADVAN
     ),
   ]);
 
+  // 网站事实仍然只允许存在于 adapter：orchestration 与 state 层都不持有 selector。
   for (const source of [workflow, stateSource]) {
     assert.doesNotMatch(source, /下一页|尾页/);
     assert.doesNotMatch(source, /nextPage|lastPage|prePage|goPage/);
     assert.doesNotMatch(source, /#next-btn|#last-btn|#pre-btn|#goto/);
+    assert.doesNotMatch(source, /#currentPage|#totalPage-show|#totalSize-show/);
     assert.doesNotMatch(source, /querySelector|chrome\.(tabs|debugger)/);
   }
-  // 生产路径只读页模型字段，绝不写回：normalize 是 read-time 兼容视图。
-  assert.doesNotMatch(workflow, /currentPage:/);
-  assert.doesNotMatch(workflow, /pageFrozenKeys:/);
-  assert.doesNotMatch(workflow, /completedPages:/);
-  assert.doesNotMatch(workflow, /saveState\([^)]*ADVANCING_PAGE/);
+
+  // 一次 transition 最多发出一次跳页动作：dispatch 调用点有且只有一个。
+  assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
+  // advancePage 只被定义与导出，没有任何生产路径调用它：本轮不自动翻页。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 1);
+  const continueBody = workflow.slice(
+    workflow.indexOf("async function continueAfterVerification"),
+    workflow.indexOf(
+      "return { start, resume, continueAfterVerification, advancePage };",
+    ),
+  );
+  assert.ok(continueBody.length > 0);
+  assert.doesNotMatch(continueBody, /advancePage|jumpToPage|ADVANCING_PAGE/);
 
   // ADVANCING_PAGE 先有合法表达，同时被当作运行中与中断状态。
   assert.equal(

@@ -14,6 +14,19 @@ export const ZXGK_RESULT_HEADERS = Object.freeze([
   "查看",
 ]);
 
+/**
+ * 网站「明确报告验证失败」的文本判据（唯一来源）。
+ *
+ * 2026-09-15 实测 `index.html` 的 AJAX error 回调：验证失效时页面把
+ * `<p class="bg-warning warning-result"><span class="important">验证码错误或验证码已过期。</span></p>`
+ * 写进结果区，同时给 `#page-div` / `#result-thead` 加 `hide`。
+ *
+ * 只有这段文字真的出现在页面上，才允许把「分页后读不到目标页」归类为需要人工
+ * 重新完成安全验证；任何其它读取异常都不得被推断成验证码问题。
+ */
+export const ZXGK_VERIFICATION_FAILURE_PATTERN =
+  /验证码错误|验证码已过期|验证已过期/;
+
 export const ZXGK_INPUT_POLICY = Object.freeze({
   entityName: true,
   organizationCode: false,
@@ -273,10 +286,31 @@ const rowParserSource = String.raw`
   };
 `;
 
+/**
+ * 在页面内读取「网站明确报告验证失败」的证据。
+ *
+ * 只认页面自己写进结果区的提示原文，不做任何推断：读不到就是没有证据（null）。
+ * 判据只在 Node 侧定义一次，这里注入的是同一份 pattern 源码。
+ */
+const verificationSignalSource = String.raw`
+  const VERIFICATION_FAILURE_PATTERN = new RegExp(${JSON.stringify(
+    ZXGK_VERIFICATION_FAILURE_PATTERN.source,
+  )});
+  const readVerificationFailure = () => {
+    const nodes = Array.from(document.querySelectorAll(".warning-result"));
+    for (const node of nodes) {
+      const value = text(node.innerText || node.textContent || "");
+      if (VERIFICATION_FAILURE_PATTERN.test(value)) return value;
+    }
+    return null;
+  };
+`;
+
 export function resultRowsExpression() {
   return String.raw`(() => {
     ${sharedDomHelpers}
     ${rowParserSource}
+    ${verificationSignalSource}
     const digit = (value) => {
       const match = String(value == null ? "" : value).match(/\d+/);
       return match ? Number(match[0]) : null;
@@ -287,6 +321,7 @@ export function resultRowsExpression() {
     const pageShown = document.querySelector("#currentPage-show");
     const totalPages = document.querySelector("#totalPage-show");
     const totalSize = document.querySelector("#totalSize-show");
+    const verification = readVerificationFailure();
     return {
       ok: true,
       rows: readResultRowEntries().map((entry) => ({
@@ -304,6 +339,10 @@ export function resultRowsExpression() {
         pagerVisible: pager ? !pager.classList.contains("hide") : false,
       },
       resultVisible: block ? !block.classList.contains("hide") : false,
+      verification: {
+        failed: verification !== null,
+        evidence: verification,
+      },
     };
   })()`;
 }
