@@ -2,8 +2,10 @@ import {
   AUTOMATION_PHASES,
   AUTOMATION_RESULT,
   AUTOMATION_STATES,
+  FIRST_PAGE_NO,
   canRecheckAutomation,
   canResumeFirstPage,
+  normalizeAutomationJob,
 } from "./automation-state.mjs";
 import {
   buildRowKey,
@@ -18,8 +20,6 @@ import {
 } from "../adapters/zxgk-execution.mjs";
 import { normalizeQueryText, selectCanonicalQuery } from "./query-identity.mjs";
 
-const FIRST_PAGE_NO = 1;
-
 /**
  * 自动核查上下文专用的 Query 失效文案（不要与手工 Query 的文案混用）。
  * worker 在自动核查归档失败时复用同一句话，避免两处文案漂移。
@@ -30,10 +30,133 @@ export const AUTOMATION_QUERY_UNAVAILABLE_MESSAGE =
 export const AUTOMATION_JOB_INVALID_MESSAGE =
   "本次核查的恢复状态不完整或不一致，无法安全继续。已生成留痕不会删除。";
 
-const operationTypes = new Set(["LIST", "DETAIL"]);
+const operationTypes = new Set(["LIST", "DETAIL", "PAGE_ADVANCE"]);
 const operationPhases = new Set(Object.values(AUTOMATION_PHASES));
 
+/** 页内处理中的状态：此时当前页尚未完成，因此不能出现在 completedPages。 */
+const inPageStates = new Set([
+  AUTOMATION_STATES.READING_RESULT_ROWS,
+  AUTOMATION_STATES.CAPTURING_LIST_PAGE,
+  AUTOMATION_STATES.OPENING_DETAIL,
+  AUTOMATION_STATES.CAPTURING_DETAIL,
+  AUTOMATION_STATES.RETURNING_TO_LIST,
+  AUTOMATION_STATES.VERIFYING_LIST_STATE,
+]);
+
 const invalidJob = (code, reason) => ({ ok: false, code, reason });
+
+/**
+ * 页模型 invariant（M8.2b），只读 normalized 兼容视图，legacy 字段原样保留。
+ * 返回 null 表示通过，否则返回 invalidJob 形状的失败结果。
+ *
+ * 分组：
+ * 1. 页坐标：currentPage / totalPages 必须是 >= 1 的整数，且 currentPage 不越界；
+ * 2. completedPages：严格从第 1 页连续，pageNo 不重复不跳页，detailCount >= 1；
+ * 3. state-sensitive：页内处理中当前页必须未完成，准备离开当前页时源页必须已完成，
+ *    只有真正带多页标记的 DONE 才要求停在最后一页且页连续。
+ *
+ * 当前页冻结集合的类型、非空、去重、长度、详情归属与冻结顺序统一由
+ * validateZxgkAutomationJobInvariant 中的冻结集合 invariant 覆盖（输入已泛化为
+ * 当前页冻结集合），因此这里不再重复一套同义校验。
+ */
+function validatePageModel(job) {
+  const { currentPage, totalPages } = job;
+  if (
+    currentPage != null &&
+    (!Number.isInteger(currentPage) || currentPage < 1)
+  )
+    return invalidJob(
+      "CURRENT_PAGE_INVALID",
+      "currentPage 必须是 >= 1 的整数。",
+    );
+  if (totalPages != null && (!Number.isInteger(totalPages) || totalPages < 1))
+    return invalidJob("TOTAL_PAGES_INVALID", "totalPages 必须是 >= 1 的整数。");
+  if (currentPage != null && totalPages != null && currentPage > totalPages)
+    return invalidJob("PAGE_OUT_OF_RANGE", "currentPage 不能大于 totalPages。");
+
+  const completedPages = job.completedPages;
+  if (!Array.isArray(completedPages))
+    return invalidJob("COMPLETED_PAGES_INVALID", "completedPages 必须是数组。");
+  for (const [index, item] of completedPages.entries()) {
+    if (!item || typeof item !== "object" || Array.isArray(item))
+      return invalidJob(
+        "COMPLETED_PAGE_ITEM_INVALID",
+        "completedPages 只能包含对象。",
+      );
+    if (!Number.isInteger(item.pageNo) || item.pageNo < 1)
+      return invalidJob(
+        "COMPLETED_PAGE_NO_INVALID",
+        "completedPages 的 pageNo 必须是 >= 1 的整数。",
+      );
+    // 严格连续同时排除重复与跳页：[1,2,3] 合法，[2] / [1,3] / [1,1] 都不合法。
+    if (item.pageNo !== index + 1)
+      return invalidJob(
+        "COMPLETED_PAGES_NOT_CONTIGUOUS",
+        "completedPages 必须从第 1 页起严格连续。",
+      );
+    if (!Number.isInteger(item.detailCount) || item.detailCount < 1)
+      return invalidJob(
+        "COMPLETED_PAGE_COUNT_INVALID",
+        "completedPages 的 detailCount 必须是 >= 1 的整数。",
+      );
+    if (item.listCaptureId != null && !String(item.listCaptureId).trim())
+      return invalidJob(
+        "COMPLETED_PAGE_CAPTURE_INVALID",
+        "completedPages 的 listCaptureId 必须是非空字符串或 null。",
+      );
+    if (item.completedAt != null && !String(item.completedAt).trim())
+      return invalidJob(
+        "COMPLETED_PAGE_TIME_INVALID",
+        "completedPages 的 completedAt 必须是非空字符串或 null。",
+      );
+    if (totalPages != null && item.pageNo > totalPages)
+      return invalidJob(
+        "COMPLETED_PAGE_OUT_OF_RANGE",
+        "completedPages 出现超过 totalPages 的页。",
+      );
+  }
+
+  // 当前页冻结集合的类型与非空已在上面的冻结集合 invariant 中校验，
+  // 长度 / 去重 / 详情进度归属 / 冻结顺序同样复用那一套，不重复实现。
+
+  if (inPageStates.has(job.state)) {
+    if (
+      currentPage != null &&
+      completedPages.some((item) => item?.pageNo === currentPage)
+    )
+      return invalidJob(
+        "CURRENT_PAGE_ALREADY_COMPLETED",
+        "页内处理中时当前页不应出现在 completedPages。",
+      );
+  }
+  if (job.state === AUTOMATION_STATES.ADVANCING_PAGE) {
+    if (currentPage == null)
+      return invalidJob(
+        "ADVANCE_PAGE_MISSING",
+        "ADVANCING_PAGE 必须存在 currentPage。",
+      );
+    if (!completedPages.some((item) => item?.pageNo === currentPage))
+      return invalidJob(
+        "ADVANCE_PAGE_NOT_COMPLETED",
+        "ADVANCING_PAGE 时源页必须已经完成。",
+      );
+  }
+  // 只有真正带多页标记的 DONE 才受多页约束：M8.1 / M8.2a 的 NO_RESULT DONE 没有页标记。
+  const hasPageMarkers = totalPages != null || completedPages.length > 0;
+  if (job.state === AUTOMATION_STATES.DONE && hasPageMarkers) {
+    if (currentPage !== totalPages)
+      return invalidJob("DONE_PAGE_MISMATCH", "多页 DONE 必须停在最后一页。");
+    if (completedPages.length !== totalPages)
+      return invalidJob(
+        "DONE_PAGES_INCOMPLETE",
+        "多页 DONE 必须连续覆盖全部页。",
+      );
+    if (job.currentOperation)
+      return invalidJob("DONE_OPERATION_ACTIVE", "DONE 时不应存在未结算操作。");
+  }
+
+  return null;
+}
 
 /**
  * 校验持久化 zxgk automationJob 中明显不可能或自相矛盾的组合。
@@ -47,21 +170,48 @@ export function validateZxgkAutomationJobInvariant(job) {
   if (!String(job.queryText || "").trim())
     return invalidJob("QUERY_TEXT_MISSING", "automationJob 缺少 queryText。");
 
-  const keysPresent = Array.isArray(job.pageOneRowKeys);
-  const keys = keysPresent ? job.pageOneRowKeys : [];
-  if (job.pageOneRowKeys != null && !keysPresent)
-    return invalidJob("ROW_KEYS_INVALID", "pageOneRowKeys 必须是数组或空值。");
-  if (keys.some((key) => !String(key || "").trim()))
-    return invalidJob("ROW_KEY_EMPTY", "pageOneRowKeys 包含空值。");
-  if (new Set(keys).size !== keys.length)
-    return invalidJob("ROW_KEYS_DUPLICATE", "pageOneRowKeys 包含重复结果。");
+  // 页模型统一从 read-time 兼容视图判断；legacy 字段本身继续按原样校验。
+  const normalized = normalizeAutomationJob(job);
+  const pageNo = Number.isInteger(normalized.currentPage)
+    ? normalized.currentPage
+    : FIRST_PAGE_NO;
+  const completedPages = Array.isArray(normalized.completedPages)
+    ? normalized.completedPages
+    : [];
 
-  if (job.pageOneRows != null) {
-    if (!Array.isArray(job.pageOneRows))
-      return invalidJob("ROWS_INVALID", "pageOneRows 必须是数组或空值。");
-    if (!keysPresent || job.pageOneRows.length !== keys.length)
+  // 当前页冻结集合与冻结顺序：M8.2b job 用 pageFrozenKeys / currentPageRows，
+  // legacy job 由 normalize 从 pageOneRowKeys / pageOneRows 派生，两者等价。
+  // 下面所有冻结集合 invariant 都基于这个视图，因此同一套规则同时覆盖两种 shape，
+  // 不需要为多页再写第二套同义校验。
+  if (job.pageOneRowKeys != null && !Array.isArray(job.pageOneRowKeys))
+    return invalidJob("ROW_KEYS_INVALID", "pageOneRowKeys 必须是数组或空值。");
+  if (job.pageOneRows != null && !Array.isArray(job.pageOneRows))
+    return invalidJob("ROWS_INVALID", "pageOneRows 必须是数组或空值。");
+  // 当前页冻结集合自身先合法，才谈得上与它的一致性校验。
+  if (job.pageFrozenKeys != null && !Array.isArray(job.pageFrozenKeys))
+    return invalidJob("PAGE_FROZEN_KEYS_INVALID", "当前页冻结集合必须是数组。");
+  if (Array.isArray(job.pageFrozenKeys) && !job.pageFrozenKeys.length)
+    return invalidJob("PAGE_FROZEN_KEYS_EMPTY", "当前页冻结集合必须非空。");
+  if (job.currentPageRows != null && !Array.isArray(job.currentPageRows))
+    return invalidJob(
+      "PAGE_ROWS_INVALID",
+      "currentPageRows 必须是数组或空值。",
+    );
+  const keysPresent = Array.isArray(normalized.pageFrozenKeys);
+  const keys = keysPresent ? normalized.pageFrozenKeys : [];
+  const pageRows = Array.isArray(normalized.currentPageRows)
+    ? normalized.currentPageRows
+    : null;
+
+  if (keys.some((key) => !String(key || "").trim()))
+    return invalidJob("ROW_KEY_EMPTY", "当前页冻结集合包含空值。");
+  if (new Set(keys).size !== keys.length)
+    return invalidJob("ROW_KEYS_DUPLICATE", "当前页冻结集合包含重复结果。");
+
+  if (pageRows) {
+    if (!keysPresent || pageRows.length !== keys.length)
       return invalidJob("ROWS_KEYS_LENGTH_MISMATCH", "冻结结果与 rowKey 数量不一致。");
-    const derived = job.pageOneRows.map(buildRowKey);
+    const derived = pageRows.map(buildRowKey);
     if (derived.some((key, index) => key !== keys[index]))
       return invalidJob("ROWS_KEYS_ORDER_MISMATCH", "冻结结果与 rowKey 顺序不一致。");
   }
@@ -118,9 +268,41 @@ export function validateZxgkAutomationJobInvariant(job) {
       return invalidJob("OPERATION_TYPE_INVALID", "currentOperation.type 无效。");
     if (!operationPhases.has(operation.phase))
       return invalidJob("OPERATION_PHASE_INVALID", "currentOperation.phase 无效。");
-    if (operation.pageNo !== FIRST_PAGE_NO)
-      return invalidJob("OPERATION_PAGE_INVALID", "M8.2a currentOperation.pageNo 必须为 1。");
-    if (operation.type === "LIST") {
+    // 不写死第 1 页：操作永远属于当前页，legacy job 的有效当前页仍是 1。
+    if (operation.pageNo !== pageNo)
+      return invalidJob(
+        "OPERATION_PAGE_INVALID",
+        "currentOperation.pageNo 必须等于当前页。",
+      );
+    if (operation.type === "PAGE_ADVANCE") {
+      // PAGE_ADVANCE 只校验形状：它描述“源页已完成，准备离开当前页”，
+      // 不携带任何详情专用字段，也不代表真的发生过翻页。
+      if (operation.targetPage !== operation.pageNo + 1)
+        return invalidJob(
+          "PAGE_ADVANCE_TARGET_INVALID",
+          "PAGE_ADVANCE.targetPage 必须等于源页号加 1。",
+        );
+      if (!Number.isInteger(operation.attempt) || operation.attempt < 1)
+        return invalidJob(
+          "PAGE_ADVANCE_ATTEMPT_INVALID",
+          "PAGE_ADVANCE.attempt 必须是 >= 1 的整数。",
+        );
+      if (
+        operation.rowKey != null ||
+        operation.caseNo != null ||
+        operation.detailTabId != null ||
+        operation.captureId != null
+      )
+        return invalidJob(
+          "PAGE_ADVANCE_HAS_DETAIL_FIELDS",
+          "PAGE_ADVANCE operation 携带了详情专用字段。",
+        );
+      if (!completedPages.some((item) => item?.pageNo === operation.pageNo))
+        return invalidJob(
+          "PAGE_ADVANCE_SOURCE_INCOMPLETE",
+          "PAGE_ADVANCE 的源页必须已经完成。",
+        );
+    } else if (operation.type === "LIST") {
       if (
         operation.rowKey != null ||
         operation.caseNo != null ||
@@ -138,9 +320,9 @@ export function validateZxgkAutomationJobInvariant(job) {
         return invalidJob("DETAIL_OPERATION_KEY_MISSING", "DETAIL operation 缺少 rowKey。");
       if (!keysPresent || !keys.includes(operation.rowKey))
         return invalidJob("DETAIL_OPERATION_KEY_UNKNOWN", "DETAIL operation.rowKey 不属于冻结结果集。");
-      if (Array.isArray(job.pageOneRows)) {
+      if (pageRows) {
         const index = keys.indexOf(operation.rowKey);
-        const expectedCaseNo = job.pageOneRows[index]?.caseNo;
+        const expectedCaseNo = pageRows[index]?.caseNo;
         if (
           expectedCaseNo &&
           operation.caseNo &&
@@ -166,6 +348,10 @@ export function validateZxgkAutomationJobInvariant(job) {
     if (operation)
       return invalidJob("COMPLETE_OPERATION_ACTIVE", "第一页完成时仍存在未结算操作。");
   }
+
+  // M8.2b 页模型 invariant：只读 normalized 兼容视图，legacy 字段不受影响。
+  const pageFailure = validatePageModel(normalized);
+  if (pageFailure) return pageFailure;
 
   return { ok: true };
 }

@@ -336,6 +336,7 @@ test("自动核查状态机显式包含 M8.1 与 M8.2a 的全部状态", async (
     "CAPTURING_DETAIL",
     "RETURNING_TO_LIST",
     "VERIFYING_LIST_STATE",
+    "ADVANCING_PAGE",
     "FIRST_PAGE_COMPLETE",
     "PAUSED",
     "FAILED",
