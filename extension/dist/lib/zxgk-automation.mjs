@@ -599,7 +599,11 @@ export function createZxgkAutomation(dependencies) {
       currentOperation: listOperation(AUTOMATION_PHASES.VERIFYING),
     });
     const snapshot = await dependencies.readResultPage(job.tabId);
-    const reconciled = reconcileRowKeys(expectedRowKeys, snapshot);
+    const reconciled = reconcileRowKeys(
+      expectedRowKeys,
+      snapshot,
+      FIRST_PAGE_NO,
+    );
     if (!reconciled.ok) throw stop(job, reconciled.error);
     return saveState(job, AUTOMATION_STATES.VERIFYING_LIST_STATE, {
       currentOperation: null,
@@ -680,7 +684,7 @@ export function createZxgkAutomation(dependencies) {
       currentOperation: detailOperation(row, AUTOMATION_PHASES.LOCATING),
     });
     const snapshot = await dependencies.readResultPage(job.tabId);
-    const located = locateRowKey(snapshot, rowKey);
+    const located = locateRowKey(snapshot, rowKey, FIRST_PAGE_NO);
     if (!located.ok) throw stop(job, located.error);
     job = await saveState(job, AUTOMATION_STATES.OPENING_DETAIL, {
       currentOperation: detailOperation(row, AUTOMATION_PHASES.OPENING),
@@ -756,7 +760,11 @@ export function createZxgkAutomation(dependencies) {
       },
     });
     const afterReturn = await dependencies.readResultPage(job.tabId);
-    const reconciled = reconcileRowKeys(job.pageOneRowKeys, afterReturn);
+    const reconciled = reconcileRowKeys(
+      job.pageOneRowKeys,
+      afterReturn,
+      FIRST_PAGE_NO,
+    );
     if (!reconciled.ok) throw stop(job, reconciled.error);
     // 只有留痕成功且确认回到第一页之后，才记为已完成。
     return saveState(job, AUTOMATION_STATES.VERIFYING_LIST_STATE, {
@@ -852,7 +860,11 @@ export function createZxgkAutomation(dependencies) {
     const pending = job.currentOperation || null;
     job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS);
     const snapshot = await dependencies.readResultPage(job.tabId);
-    const reconciled = reconcileFrozenSet(job.pageOneRowKeys, snapshot);
+    const reconciled = reconcileFrozenSet(
+      job.pageOneRowKeys,
+      snapshot,
+      FIRST_PAGE_NO,
+    );
     if (!reconciled.ok) throw stop(job, reconciled.error);
     // 这里刻意不清空 currentOperation：先补记上一轮已经成功的留痕，再收尾。
     // 否则会在“补记”之前多出一个新的中断窗口，反而可能重复留痕。

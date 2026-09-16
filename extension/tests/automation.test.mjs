@@ -1104,7 +1104,9 @@ test("M8.2a 绝不点击任何分页控件", async () => {
     readFile(new URL("../src/worker.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/lib/zxgk-automation.mjs", import.meta.url), "utf8"),
   ]);
-  for (const source of [adapter, worker, workflow]) {
+  // adapter 是网站事实层，允许持有分页 selector 与跳页 primitive；
+  // 这里守住的是 orchestration / worker：它们仍然不得接触任何分页动作。
+  for (const source of [worker, workflow]) {
     assert.doesNotMatch(source, /下一页|尾页/);
     assert.doesNotMatch(source, /nextPage|lastPage|prePage|goPage/);
     assert.doesNotMatch(source, /#next-btn|#last-btn|#pre-btn|#goto/);
@@ -2125,7 +2127,8 @@ test("继续本次核查也绝不点击任何分页控件", async () => {
     readFile(new URL("../src/worker.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/lib/zxgk-automation.mjs", import.meta.url), "utf8"),
   ]);
-  for (const source of [adapter, worker, workflow]) {
+  // adapter 允许持有分页事实；继续核查路径本身仍然不得触碰分页动作。
+  for (const source of [worker, workflow]) {
     assert.doesNotMatch(source, /下一页|尾页/);
     assert.doesNotMatch(source, /nextPage|lastPage|prePage|goPage/);
     assert.doesNotMatch(source, /#next-btn|#last-btn|#pre-btn|#goto/);

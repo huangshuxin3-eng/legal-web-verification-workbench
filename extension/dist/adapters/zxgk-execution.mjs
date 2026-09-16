@@ -1,4 +1,4 @@
-import { AUTOMATION_RESULT } from "../lib/automation-state.mjs";
+import { AUTOMATION_RESULT, FIRST_PAGE_NO } from "../lib/automation-state.mjs";
 
 export const ZXGK_EXECUTION_ADAPTER = "zxgk_execution";
 export const ZXGK_EXECUTION_URL =
@@ -187,8 +187,22 @@ export function classifyZxgkExecutionResult(snapshot) {
 //    每行为 <td><strong>标签：</strong></td><td>值</td>，其中“案号”一行可用于
 //    校验该详情确实属于当前处理的结果。
 // 5. 结果表格下方是分页控件；M8.2a 只读取当前页与总页数（#currentPage、
-//    #currentPage-show、#totalPage-show），绝不触发任何分页动作。分页属于 M8.2b。
+//    #currentPage-show、#totalPage-show），绝不触发任何分页动作。
+//
+// M8.2b Slice 2：分页的“网站事实”仍然全部留在本 adapter：
+//   - 读取页信号由 resultRowsExpression 负责；
+//   - 跳页只是“改写 #currentPage 的 value → 调用页面自己的查询函数”，
+//     由 jumpToPageExpression 负责，并且刻意不使用网站自带的分页控件函数：
+//     那些函数会把越界目标夹取到末页，使“请求的目标页”与“实际目标页”不一致。
+//   - 本 adapter 只发出动作并读取事实，不决定是否继续、不决定 PAUSED；
+//     baseline totalPages 的比较属于 automation orchestration。
+//   本切片只暴露 primitive，尚未接入 automation，真人行为仍是第 1 页后停止。
 // ---------------------------------------------------------------------------
+
+/** 合法页码：>= 1 的整数。adapter 只做事实层校验，不决定 runtime baseline。 */
+function isPageNo(value) {
+  return Number.isInteger(value) && value >= 1;
+}
 
 /** 轻度规范化：只统一全角/半角与空白，不改写法律意义上的内容。 */
 export function normalizeRowText(value) {
@@ -294,6 +308,43 @@ export function resultRowsExpression() {
   })()`;
 }
 
+/**
+ * 跳到指定结果页的网站动作（direct jump）。
+ *
+ * 真实页面事实（§26 Slice 0 CONFIRMED）：分页是纯 AJAX，所有分页入口最终都只是
+ * 改写 #currentPage 的 value，然后调用页面自己的查询函数重新提交表单。
+ * 因此本 primitive 直接改写 #currentPage 再触发查询，刻意绕开网站自带的
+ * 分页控件函数——它们对越界目标有夹取行为，会让“请求的目标页”被静默改掉，
+ * 而 M8.2b 的每一步都必须 fail closed。
+ *
+ * 返回值只表示“页面动作已成功发出”，**不代表已经到达 targetPage**：
+ * 是否真的到达、结果是否可读、observed totalPages 是否仍等于 baseline，
+ * 都必须在后续切片里重新读取页面快照自行判定。
+ *
+ * targetPage 的上界由 orchestration 用 baseline totalPages 控制，
+ * 这里只做最基本的防御性校验。
+ */
+export function jumpToPageExpression(targetPage) {
+  if (!isPageNo(targetPage))
+    throw new Error(
+      `目标页码必须是 >= 1 的整数，已拒绝生成跳页动作（收到 ${String(targetPage)}）。`,
+    );
+  const encoded = JSON.stringify(targetPage);
+  return String.raw`(() => {
+    const targetPage = ${encoded};
+    if (!Number.isInteger(targetPage) || targetPage < 1)
+      return { ok: false, error: "目标页码非法，未发出跳页动作。" };
+    const input = document.querySelector("#currentPage");
+    if (!input) return { ok: false, error: "页面缺少分页输入框，未发出跳页动作。" };
+    const search = window.search;
+    if (typeof search !== "function")
+      return { ok: false, error: "页面未提供结果查询函数，未发出跳页动作。" };
+    input.value = String(targetPage);
+    search.call(window);
+    return { ok: true, targetPage };
+  })()`;
+}
+
 /** 打开“查看”前先在页面内按 rowKey 精确定位，定位不到就绝不点击。 */
 export function openDetailExpression(expectedRowKey) {
   const encoded = JSON.stringify(String(expectedRowKey));
@@ -381,17 +432,31 @@ export function closeDetailExpression() {
   })()`;
 }
 
-export function validateFirstPage(snapshot) {
+/**
+ * 校验 snapshot 确实就是 expectedPageNo 这一页。
+ *
+ * 必须同时满足「分页输入框里的页码」与「页面显示的页码」都等于 expectedPageNo：
+ * 只看其中一个都不足以证明当前页，也不能只看 rows 长得像就放过。
+ *
+ * 这里刻意不判断 observed totalPages 与 runtime baseline 是否一致：任何变化
+ * 都会让结果集可能变化，是否 PAUSED 由 orchestration 决定，adapter 只报事实。
+ */
+export function validatePage(snapshot, expectedPageNo) {
+  if (!isPageNo(expectedPageNo))
+    return {
+      ok: false,
+      error: `目标页码必须是 >= 1 的整数（收到 ${String(expectedPageNo)}）。`,
+    };
   if (!snapshot || snapshot.ok !== true || !Array.isArray(snapshot.rows))
     return { ok: false, error: "无法读取当前页面的查询结果表格。" };
   const page = snapshot.page || {};
-  if (page.input !== 1 || page.shown !== 1)
+  if (page.input !== expectedPageNo || page.shown !== expectedPageNo)
     return {
       ok: false,
-      error: `当前页面不是结果第 1 页（页面显示第 ${page.shown ?? "未知"} 页）。`,
+      error: `当前页面不是结果第 ${expectedPageNo} 页（页面显示第 ${page.shown ?? "未知"} 页）。`,
     };
   if (!snapshot.rows.length)
-    return { ok: false, error: "第一页没有可解析的结果行。" };
+    return { ok: false, error: `第 ${expectedPageNo} 页没有可解析的结果行。` };
   for (const [index, row] of snapshot.rows.entries()) {
     if (!row.name || !row.caseNo || !row.filingDate)
       return {
@@ -404,25 +469,39 @@ export function validateFirstPage(snapshot) {
   return { ok: true };
 }
 
+/** M8.2a 兼容入口：等价于校验第 1 页。 */
+export function validateFirstPage(snapshot) {
+  return validatePage(snapshot, FIRST_PAGE_NO);
+}
+
 /**
- * 冻结第一页目标集合。rowKey 重复时 fail closed：宁可停下，
+ * 冻结指定页的目标集合。rowKey 重复时 fail closed：宁可停下，
  * 也不靠行号猜测该处理哪一条。
  */
-export function freezePageOneRows(snapshot) {
-  const validation = validateFirstPage(snapshot);
+export function freezePageRows(snapshot, expectedPageNo) {
+  const validation = validatePage(snapshot, expectedPageNo);
   if (!validation.ok) return validation;
   const keys = snapshot.rows.map(buildRowKey);
   const duplicate = keys.find((key, index) => keys.indexOf(key) !== index);
   if (duplicate)
     return {
       ok: false,
-      error: `第一页存在两条完全相同的结果（${duplicate}），无法可靠区分，自动核查已停止。`,
+      error: `第 ${expectedPageNo} 页存在两条完全相同的结果（${duplicate}），无法可靠区分，自动核查已停止。`,
     };
   return { ok: true, rows: snapshot.rows, keys };
 }
 
-export function locateRowKey(snapshot, expectedRowKey) {
-  const validation = validateFirstPage(snapshot);
+/** M8.2a 兼容入口：等价于冻结第 1 页。 */
+export function freezePageOneRows(snapshot) {
+  return freezePageRows(snapshot, FIRST_PAGE_NO);
+}
+
+/**
+ * 在指定页内按 rowKey 精确定位。定位前必须先证明 snapshot 就是 expectedPageNo，
+ * 否则会把别的页面上恰好同名的结果当成目标。
+ */
+export function locateRowKey(snapshot, expectedRowKey, expectedPageNo) {
+  const validation = validatePage(snapshot, expectedPageNo);
   if (!validation.ok) return validation;
   const matches = snapshot.rows.filter(
     (row) => buildRowKey(row) === expectedRowKey,
@@ -440,9 +519,9 @@ export function locateRowKey(snapshot, expectedRowKey) {
   return { ok: true, row: matches[0] };
 }
 
-/** 返回列表后必须复核：仍是第 1 页，且冻结的目标集合仍然全部可定位。 */
-export function reconcileRowKeys(expectedRowKeys, snapshot) {
-  const validation = validateFirstPage(snapshot);
+/** 返回列表后必须复核：仍是 expectedPageNo，且冻结的目标集合仍然全部可定位。 */
+export function reconcileRowKeys(expectedRowKeys, snapshot, expectedPageNo) {
+  const validation = validatePage(snapshot, expectedPageNo);
   if (!validation.ok) return validation;
   const available = new Set(snapshot.rows.map(buildRowKey));
   const missing = expectedRowKeys.filter((key) => !available.has(key));
@@ -455,35 +534,35 @@ export function reconcileRowKeys(expectedRowKeys, snapshot) {
 }
 
 /**
- * 「继续本次核查」时的严格集合校验：当前第 1 页必须与原冻结集合完全一致，
+ * 「继续本次核查」时的严格集合校验：expectedPageNo 必须与原冻结集合完全一致，
  * 只允许页面展示顺序变化。
  *
  * 不新增、不减少、不重复；任何不一致都 fail closed，绝不尝试合并两次结果集。
  * 返回按原冻结顺序排列的结果行，因此继续时仍按 rowKey 身份处理，而不是按行号。
  */
-export function reconcileFrozenSet(expectedRowKeys, snapshot) {
-  const validation = validateFirstPage(snapshot);
+export function reconcileFrozenSet(expectedRowKeys, snapshot, expectedPageNo) {
+  const validation = validatePage(snapshot, expectedPageNo);
   if (!validation.ok) return validation;
   const keys = snapshot.rows.map(buildRowKey);
   const duplicate = keys.find((key, index) => keys.indexOf(key) !== index);
   if (duplicate)
     return {
       ok: false,
-      error: `当前第 1 页出现重复结果（${duplicate}），无法可靠继续，本次自动核查已停止。`,
+      error: `当前第 ${expectedPageNo} 页出现重复结果（${duplicate}），无法可靠继续，本次自动核查已停止。`,
     };
   const available = new Set(keys);
   const missing = expectedRowKeys.filter((key) => !available.has(key));
   if (missing.length)
     return {
       ok: false,
-      error: `结果集合已变化：当前第 1 页已找不到以下结果：${missing.join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
+      error: `结果集合已变化：当前第 ${expectedPageNo} 页已找不到以下结果：${missing.join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
     };
   const frozen = new Set(expectedRowKeys);
   const extra = keys.filter((key) => !frozen.has(key));
   if (extra.length)
     return {
       ok: false,
-      error: `结果集合已变化：当前第 1 页出现新的结果：${extra.join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
+      error: `结果集合已变化：当前第 ${expectedPageNo} 页出现新的结果：${extra.join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
     };
   const byKey = new Map(snapshot.rows.map((row) => [buildRowKey(row), row]));
   return { ok: true, rows: expectedRowKeys.map((key) => byKey.get(key)) };
