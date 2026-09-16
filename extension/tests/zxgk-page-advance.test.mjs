@@ -799,8 +799,9 @@ test("I. 每个 transition 只发一次跳页动作，且没有任何生产路�
 
   // orchestration 只消费注入的 primitive：dispatch 调用点有且只有一个。
   assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
-  // advancePage 只被定义与导出，没有任何生产路径调用它。
-  assert.equal((workflow.match(/advancePage\(/g) || []).length, 1);
+  // advancePage：1 次定义 + 1 次调用（M8.2b Slice 3B 的两页 driver 里唯一的一次）。
+  // 调用点只有一处，因此一次执行不可能翻两次页，结构上也不可能进入第 3 页。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 2);
   const continueBody = workflow.slice(
     workflow.indexOf("async function continueAfterVerification"),
     workflow.indexOf(
@@ -916,7 +917,7 @@ test("K. 验证失败判据只在 adapter；advancePage 不由异常或页面分
 
   // advancePage 不得再把“页面分类结果”当作验证失效的判据。
   const start = workflow.indexOf("async function advancePage");
-  const end = workflow.indexOf("async function runFirstPageLoop");
+  const end = workflow.indexOf("async function runCurrentPageLoop");
   assert.ok(start >= 0 && start < end);
   const body = workflow.slice(start, end);
   assert.doesNotMatch(body, /inspectResult/);

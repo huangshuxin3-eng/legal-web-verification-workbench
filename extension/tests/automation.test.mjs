@@ -79,7 +79,10 @@ async function harness(result, options = {}) {
   const list = {
     rows: (options.rows || []).map((row) => ({ ...row })),
     pageNo: options.pageNo ?? 1,
-    totalPages: options.totalPages ?? 21,
+    // 本桩默认是**单页站点**：第 1 页即最后一页，因此第 1 页处理完是 DONE。
+    // 跨页（第 1 页 → 第 2 页 → PARTIAL_COMPLETE）由
+    // tests/zxgk-two-page-run.test.mjs 用专门的跨页桩覆盖。
+    totalPages: options.totalPages ?? 1,
     totalSize: options.totalSize ?? (options.rows || []).length,
     fail: false,
   };
@@ -338,6 +341,7 @@ test("自动核查状态机显式包含 M8.1 与 M8.2a 的全部状态", async (
     "VERIFYING_LIST_STATE",
     "ADVANCING_PAGE",
     "FIRST_PAGE_COMPLETE",
+    "PARTIAL_COMPLETE",
     "PAUSED",
     "FAILED",
     "DONE",
@@ -673,6 +677,20 @@ test("DONE/FAILED/HAS_RESULT/FIRST_PAGE_COMPLETE 允许新一轮，运行中状�
     }),
     false,
   );
+  // PARTIAL_COMPLETE 是正常终止态，但**不开**自动继续 / 重新自动核查：
+  // 再启动会从第 1 页重新产生一整套 Capture，容易被误解成「继续剩余分页」。
+  assert.equal(
+    state.canStartNewAutomation({
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    }),
+    false,
+  );
+  assert.equal(
+    state.canResumeFirstPage({
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    }),
+    false,
+  );
 });
 
 test("Side Panel 区分手工 Query，自动请求只发送 Task 上下文", async () => {
@@ -794,8 +812,13 @@ test("HAS_RESULT 复用本轮 Query，先列表留痕再按展示顺序逐条处
   });
   const keys = pageOneRows.map(adapter.buildRowKey);
 
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
-  assert.notEqual(job.state, state.AUTOMATION_STATES.DONE);
+  // 单页站点：第 1 页处理完就是全站完成（DONE），而不是 legacy 的
+  // FIRST_PAGE_COMPLETE。跨页停在第 2 页的形态见 zxgk-two-page-run.test.mjs。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
+  assert.deepEqual(
+    job.completedPages.map((item) => item.pageNo),
+    [1],
+  );
   // 只创建一条 Query，且所有 Capture 都属于它。
   assert.deepEqual(named(run, "create-query"), [
     ["create-query", executionTask.id, executionTask.entity_name],
@@ -849,14 +872,19 @@ test("expectedDetailCount 必须对应 N 个唯一 rowKey，缺一不可", async
   });
   assert.equal(job.expectedDetailCount, 1);
   assert.equal(job.completedDetailKeys.length, 1);
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   assert.equal(new Set(job.completedDetailKeys).size, 1);
-  assert.equal(
-    job.completedDetailKeys[0],
-    adapter.buildRowKey(rows[0]),
+  assert.equal(job.completedDetailKeys[0], adapter.buildRowKey(rows[0]));
+  // 单页站点：页坐标与页面完成检查点三项一致。
+  assert.equal(job.currentPage, 1);
+  assert.equal(job.totalPages, 1);
+  assert.deepEqual(
+    job.completedPages.map((item) => item.pageNo),
+    [1],
   );
-  assert.equal(job.firstPageComplete.newCaptures, 2);
-  assert.equal(job.firstPageComplete.totalPages, 21);
+  assert.equal(job.completedPages[0].detailCount, 1);
+  // 新产品路径不再写 M8.2a 的 legacy 完成标记。
+  assert.equal(job.firstPageComplete, null);
 });
 
 test("第一页解析：rowKey 含稳定结果身份，重复身份 fail closed", async () => {
@@ -1046,7 +1074,7 @@ test("列表顺序变化但 rowKey 仍可匹配时继续，且不改变冻结的
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   // 处理顺序仍以冻结的第一页为准，而不是页面当时的行号。
   assert.deepEqual(
     named(run, "open-detail").map(([, rowKey]) => rowKey),
@@ -1098,33 +1126,46 @@ test("目标 rowKey 在返回后无法定位时 fail closed", async () => {
   assert.equal(named(run, "open-detail").length, 2);
 });
 
-test("M8.2a 绝不点击任何分页控件", async () => {
+test("分页动作只经注入 primitive：orchestration / worker 不持有分页 selector", async () => {
   const [adapter, worker, workflow] = await Promise.all([
     readFile(new URL("../src/adapters/zxgk-execution.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/worker.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/lib/zxgk-automation.mjs", import.meta.url), "utf8"),
   ]);
   // adapter 是网站事实层，允许持有分页 selector 与跳页 primitive；
-  // 这里守住的是 orchestration / worker：它们仍然不得接触任何分页动作。
+  // orchestration 只调用注入的 jumpToPage，worker 只把同一个 primitive 注入标签页，
+  // 两者都不得自己接触任何分页控件。
   for (const source of [worker, workflow]) {
     assert.doesNotMatch(source, /下一页|尾页/);
     assert.doesNotMatch(source, /nextPage|lastPage|prePage|goPage/);
     assert.doesNotMatch(source, /#next-btn|#last-btn|#pre-btn|#goto/);
+    assert.doesNotMatch(source, /querySelector/);
   }
   // 只读当前页与总页数。
   assert.match(adapter, /#currentPage-show/);
   assert.match(adapter, /#totalPage-show/);
 });
 
-test("Side Panel 显示第一页进度与完成态，且不使用“全部完成”措辞", async () => {
+test("Side Panel 按 currentPage 显示进度，多页终止态不使用“全部完成”措辞", async () => {
   const panel = await readFile(
     new URL("../src/sidepanel.mjs", import.meta.url),
     "utf8",
   );
+  // 页内处理与完成态都按 currentPage 渲染，绝不写死“第 1 页”。
   assert.match(panel, /AUTOMATION_STATES\.FIRST_PAGE_COMPLETE/);
-  assert.match(panel, /第 1 页已完整处理/);
+  assert.match(panel, /AUTOMATION_STATES\.PARTIAL_COMPLETE/);
+  assert.match(panel, /第 \$\{currentPage\} 页已完整处理/);
+  assert.match(panel, /正在处理第 \$\{currentPage\} 页/);
+  assert.match(panel, /已自动处理第 1–\$\{currentPage\} 页/);
+  assert.doesNotMatch(
+    panel,
+    /正在留痕第一页|正在读取第一页|正在返回第一页|正在校验第一页/,
+  );
+  // 多页 DONE 不再谎称“未发现相关结果 / 已生成 1 份留痕”。
+  assert.match(panel, /progress\.completedPageCount > 0/);
+  assert.match(panel, /第 \$\{currentPage\} 页（网站共 \$\{totalPages\} 页）/);
+  // 部分完成是正常终止：不提供自动继续，也不提供重新自动核查。
   assert.match(panel, /后续分页暂未自动执行。请人工继续核查。/);
-  assert.match(panel, /正在处理第 1 页/);
   assert.match(panel, /当前处理：/);
   assert.match(panel, /累计新增留痕/);
   assert.match(panel, /isAutomationRunning\(automationJob\)/);
@@ -1182,7 +1223,7 @@ test("同文本 Query 已存在时直接复用，不创建新的同文本 Query"
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   assert.equal(job.queryId, "query-canonical");
   // 所有留痕（1 列表 + 3 详情）都挂在同一个已有 Query 下。
   assert.deepEqual(
@@ -1644,9 +1685,14 @@ test("resume 遇到非法持久化 job 时在任何外部动作前 fail closed",
     archiveFailure: ({ kind, detailIndex }) =>
       kind === "detail" && detailIndex === 2,
   });
-  const duplicateKeys = [...run.job.pageOneRowKeys];
+  // 损坏当前页冻结集合（M8.2b 的权威字段），legacy 字段同步损坏以保持一致。
+  const duplicateKeys = [...run.job.pageFrozenKeys];
   duplicateKeys[1] = duplicateKeys[0];
-  run.replaceJob({ ...run.job, pageOneRowKeys: duplicateKeys });
+  run.replaceJob({
+    ...run.job,
+    pageFrozenKeys: duplicateKeys,
+    pageOneRowKeys: duplicateKeys,
+  });
   const callsBefore = run.calls.length;
   const queryCreatesBefore = named(run, "create-query").length;
   const archivesBefore = named(run, "archive-existing-m4").length;
@@ -2083,6 +2129,18 @@ test("canResumeFirstPage 只在存在未完成第一页进度时为真", async (
     }),
     false,
   );
+  // 第 2 页起没有安全的 fresh resume 路径：不得给出「继续本次核查」这种
+  // 必然失败的动作（它会拿第 1 页的 keys 去 reconcile 第 2 页）。
+  assert.equal(state.canResumeFirstPage({ ...base, currentPage: 2 }), false);
+  assert.equal(
+    state.canResumeFirstPage({
+      ...base,
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+      currentPage: 2,
+      totalPages: 21,
+    }),
+    false,
+  );
 });
 
 test("Side Panel 提供「继续本次核查」，与重新开始区分", async () => {
@@ -2175,7 +2233,7 @@ test("Side Panel 的列表留痕进度使用 hasListCapture，不谎报待留痕
     ),
   ]);
   assert.match(panel, /progress\.listCaptureComplete/);
-  assert.match(progressView, /hasListCapture\(job\)/);
+  assert.match(progressView, /hasListCapture\(normalized\)/);
   assert.doesNotMatch(panel, /listCapture \?/);
 });
 

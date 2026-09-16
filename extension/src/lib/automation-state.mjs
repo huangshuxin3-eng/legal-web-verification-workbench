@@ -16,10 +16,25 @@ export const AUTOMATION_STATES = Object.freeze({
   VERIFYING_LIST_STATE: "VERIFYING_LIST_STATE",
   ADVANCING_PAGE: "ADVANCING_PAGE",
   FIRST_PAGE_COMPLETE: "FIRST_PAGE_COMPLETE",
+  PARTIAL_COMPLETE: "PARTIAL_COMPLETE",
   PAUSED: "PAUSED",
   FAILED: "FAILED",
   DONE: "DONE",
 });
+
+/**
+ * "部分完成"终止态：PARTIAL_COMPLETE（M8.2b Slice 3B）。
+ *
+ * 语义：这一轮自动执行已经把连续页前缀 1..currentPage 完整处理过，但网站仍然存在
+ * 未处理的后续页。它是**正常结束**：不是错误、不是运行中，也是一个已结算态——
+ * 后台重启时不会像中断状态那样被改写成 FAILED。
+ *
+ * 它对第 2 / 21 页与第 5 / 21 页同样成立，因此名字里只描述"处理到什么程度"，
+ * 绝不写开发阶段或具体页数。
+ *
+ * FIRST_PAGE_COMPLETE 继续作为 M8.2a 的 legacy 终止态保留（只由「继续本次核查」
+ * 的第 1 页路径产生），全新核查不再使用它。
+ */
 
 /**
  * 页模型的最小页号。
@@ -86,6 +101,12 @@ export function canRecheckAutomation(job) {
   );
 }
 
+/**
+ * PARTIAL_COMPLETE 有意不在其中：当前没有「从部分完成继续自动核查」的产品语义，
+ * 再次启动实际上会从第 1 页重新产生一整套 Capture，很容易被误解成「继续剩余分页」。
+ * 因此部分完成时既不提供自动继续，也不提供重新自动核查，用户只能看到状态，
+ * 必要时返回手工模式。
+ */
 export function canStartNewAutomation(job) {
   return (
     !job ||
@@ -104,12 +125,17 @@ export function canStartNewAutomation(job) {
  * 与 canStartNewAutomation 的区别是语义：这里有未完成的第一页进度，
  * 正确动作是「继续本次核查」（复用原 Query、跳过已完成的列表与详情），
  * 而不是从第 1 条重新开始。
+ *
+ * 只允许第 1 页：当前没有「跨页 fresh resume」的安全路径（它需要重建查询环境并
+ * 重新完成人工验证后跳页），对第 2 页起给出「继续本次核查」只会得到一个必然失败的
+ * 动作，因此这里直接按页坐标收窄（legacy job 由 normalize 派生为第 1 页）。
  */
 export function canResumeFirstPage(job) {
   return (
     [AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(job?.state) &&
     job?.result === AUTOMATION_RESULT.HAS_RESULT &&
     Boolean(job?.queryId) &&
+    normalizeAutomationJob(job).currentPage === FIRST_PAGE_NO &&
     Array.isArray(job?.pageOneRowKeys) &&
     job.pageOneRowKeys.length > 0
   );

@@ -393,17 +393,45 @@ test("state-sensitive：页内处理中当前页必须未完成，准备离开�
     "CURRENT_PAGE_ALREADY_COMPLETED",
   );
 
+  // ADVANCING_PAGE 必须同时持有合法的 PAGE_ADVANCE intent：后台没有任何待结算
+  // 动作却停在这个状态，就是一个假的"处理中"状态。
+  const advancingOperation = {
+    type: "PAGE_ADVANCE",
+    pageNo: 2,
+    targetPage: 3,
+    attempt: 1,
+    phase: state.AUTOMATION_PHASES.LOCATING,
+  };
   const advancing = {
     ...pageJob(state, adapter, {
       state: state.AUTOMATION_STATES.ADVANCING_PAGE,
       currentPage: 2,
     }),
     completedPages: [1, 2].map(pageSummary),
+    currentOperation: advancingOperation,
   };
   assert.deepEqual(validate(advancing), { ok: true });
+  // 源页未完成由通用 operation 校验的 PAGE_ADVANCE_SOURCE_INCOMPLETE 拒绝。
   assert.equal(
     validate({ ...advancing, completedPages: [pageSummary(1)] }).code,
-    "ADVANCE_PAGE_NOT_COMPLETED",
+    "PAGE_ADVANCE_SOURCE_INCOMPLETE",
+  );
+  assert.equal(
+    validate({ ...advancing, currentOperation: null }).code,
+    "ADVANCE_OPERATION_MISSING",
+  );
+  assert.equal(
+    validate({
+      ...advancing,
+      currentOperation: {
+        type: "LIST",
+        pageNo: 2,
+        rowKey: null,
+        caseNo: null,
+        phase: state.AUTOMATION_PHASES.CAPTURING,
+      },
+    }).code,
+    "ADVANCE_OPERATION_MISSING",
   );
 
   // M8.2a FIRST_PAGE_COMPLETE：currentPage 可以（且必然）在 completedPages 里。
@@ -625,10 +653,10 @@ test("兼容：DETAIL 与 LIST 的合法 Capture recovery window 保持合法", 
 });
 
 // ---------------------------------------------------------------------------
-// H. Slice 3A 边界：确定性的单页跳转协议已就位，但没有生产路径自动翻页
+// H. Slice 3B 边界：只允许一次 Page 1 → Page 2 transition，结构上不可能到第 3 页
 // ---------------------------------------------------------------------------
 
-test("Slice 3A：单页跳转协议已就位，但仍没有生产路径自动翻页", async () => {
+test("Slice 3B：两页 driver 只有一次 advancePage 调用点，且没有任何分页循环", async () => {
   const { state } = await modules();
   const [workflow, stateSource] = await Promise.all([
     readFile(
@@ -652,18 +680,60 @@ test("Slice 3A：单页跳转协议已就位，但仍没有生产路径自动翻
 
   // 一次 transition 最多发出一次跳页动作：dispatch 调用点有且只有一个。
   assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
-  // advancePage 只被定义与导出，没有任何生产路径调用它：本轮不自动翻页。
-  assert.equal((workflow.match(/advancePage\(/g) || []).length, 1);
-  const continueBody = workflow.slice(
-    workflow.indexOf("async function continueAfterVerification"),
-    workflow.indexOf(
-      "return { start, resume, continueAfterVerification, advancePage };",
-    ),
-  );
-  assert.ok(continueBody.length > 0);
-  assert.doesNotMatch(continueBody, /advancePage|jumpToPage|ADVANCING_PAGE/);
+  // advancePage：1 次定义 + 1 次调用（两页 driver 里唯一的一次）。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 2);
 
-  // ADVANCING_PAGE 先有合法表达，同时被当作运行中与中断状态。
+  // 两页 driver 内部：恰好一次 advancePage，且没有 for / while 分页循环，
+  // 也没有任何"本轮允许跑几页"的运行期上限。
+  const driverBody = workflow.slice(
+    workflow.indexOf("async function runPageRun"),
+    workflow.indexOf("async function finishPageRun"),
+  );
+  assert.ok(driverBody.length > 0);
+  assert.equal((driverBody.match(/advancePage\(/g) || []).length, 1);
+  assert.doesNotMatch(driverBody, /\bfor\s*\(|\bwhile\s*\(/);
+  assert.doesNotMatch(driverBody, /PAGES_PER_RUN|maxPages|pageLimit/i);
+
+  // 终态函数自己不翻页：第 2 页循环之后直接落到 DONE / PARTIAL_COMPLETE 然后 return。
+  const finishBody = workflow.slice(
+    workflow.indexOf("async function finishPageRun"),
+    workflow.indexOf("async function resumeFirstPage"),
+  );
+  assert.ok(finishBody.length > 0);
+  assert.doesNotMatch(finishBody, /advancePage|jumpToPage|ADVANCING_PAGE/);
+  assert.match(finishBody, /AUTOMATION_STATES\.PARTIAL_COMPLETE/);
+  assert.match(finishBody, /AUTOMATION_STATES\.DONE/);
+
+  // PARTIAL_COMPLETE 是已结算态：不是运行中，不会被重启扫描改写成 FAILED，
+  // 也不允许再次自动核查。
+  assert.equal(
+    state.AUTOMATION_RUNNING_STATES.includes(
+      state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    ),
+    false,
+  );
+  assert.equal(
+    state.AUTOMATION_INTERRUPTED_STATES.includes(
+      state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    ),
+    false,
+  );
+  assert.equal(state.isAutomationRunning({ state: "PARTIAL_COMPLETE" }), false);
+  assert.equal(
+    state.canStartNewAutomation({
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    }),
+    false,
+  );
+  // 它也不是一个"假的运行中"：不提供继续核查入口。
+  assert.equal(
+    state.canRecheckAutomation({
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    }),
+    false,
+  );
+
+  // ADVANCING_PAGE 仍然是运行中 + 中断状态：跳页是真实网站动作，可被后台杀死。
   assert.equal(
     state.AUTOMATION_RUNNING_STATES.includes(
       state.AUTOMATION_STATES.ADVANCING_PAGE,
@@ -677,4 +747,78 @@ test("Slice 3A：单页跳转协议已就位，但仍没有生产路径自动翻
     true,
   );
   assert.equal(state.isAutomationRunning({ state: "ADVANCING_PAGE" }), true);
+});
+
+test("PARTIAL_COMPLETE invariant：连续前缀、未到末页、无残留操作", async () => {
+  const { state, adapter, validate } = await modules();
+  const keys = keysOf(adapter, rowsOfPage(2));
+  const keysOfPage = (pageNo) => keysOf(adapter, rowsOfPage(pageNo));
+  const partial = (patch = {}) =>
+    validate(
+      pageJob(state, adapter, {
+        state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+        currentPage: 2,
+        completedPages: [1, 2].map(pageSummary),
+        completedDetailKeys: keys,
+        ...patch,
+      }),
+    );
+
+  assert.deepEqual(partial(), { ok: true });
+
+  // 已到最后一页时必须 DONE，不能谎称"部分完成"。
+  assert.equal(partial({ totalPages: 2 }).code, "PARTIAL_PAGE_EXHAUSTED");
+  // completedPages 必须连续覆盖到 currentPage。
+  assert.equal(
+    partial({ completedPages: [pageSummary(1)] }).code,
+    "PARTIAL_PAGES_INCOMPLETE",
+  );
+  // 页坐标与冻结集合一起前移，才能把判据精确地收敛到"页前缀不连续"。
+  assert.equal(
+    partial({
+      currentPage: 3,
+      totalPages: 4,
+      completedPages: [1, 2].map(pageSummary),
+      completedDetailKeys: keysOfPage(3),
+    }).code,
+    "PARTIAL_PAGES_INCOMPLETE",
+  );
+  // 页坐标缺失时无法证明"网站仍有未处理页"。
+  assert.equal(partial({ totalPages: null }).code, "PARTIAL_PAGE_MISSING");
+  assert.equal(
+    partial({ currentPage: null, completedDetailKeys: keysOfPage(1) }).code,
+    "PARTIAL_PAGE_MISSING",
+  );
+  // 有未结算操作就不是终止态。
+  assert.equal(
+    partial({
+      currentOperation: {
+        type: "LIST",
+        pageNo: 2,
+        rowKey: null,
+        caseNo: null,
+        phase: state.AUTOMATION_PHASES.CAPTURING,
+      },
+    }).code,
+    "PARTIAL_OPERATION_ACTIVE",
+  );
+  // 与 legacy 完成标记互斥（既有 COMPLETE_STATE_MISMATCH 已经覆盖）。
+  assert.equal(
+    partial({
+      firstPageComplete: { pageNo: 1, totalPages: 21, detailCount: 10 },
+    }).code,
+    "COMPLETE_STATE_MISMATCH",
+  );
+  // DONE 语义不能被 PARTIAL_COMPLETE 冒充。
+  assert.equal(
+    validate(
+      pageJob(state, adapter, {
+        state: state.AUTOMATION_STATES.DONE,
+        currentPage: 2,
+        completedPages: [1, 2].map(pageSummary),
+        completedDetailKeys: keys,
+      }),
+    ).code,
+    "DONE_PAGE_MISMATCH",
+  );
 });

@@ -193,27 +193,33 @@ const automationLabels = {
   [AUTOMATION_STATES.CREATING_QUERY]: "正在创建 Query",
   [AUTOMATION_STATES.CAPTURING_NO_RESULT]: "正在生成并归档无结果留痕",
   [AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED]: "已发现查询结果，需要人工继续",
-  [AUTOMATION_STATES.CAPTURING_LIST_PAGE]: "正在留痕第一页结果列表",
-  [AUTOMATION_STATES.READING_RESULT_ROWS]: "正在读取第一页结果",
+  // 页内状态的文案不再写死“第 1 页”：具体页码由 automation-result
+  // 按 progress.currentPage 渲染，第 2 页时不能显示第 1 页。
+  [AUTOMATION_STATES.CAPTURING_LIST_PAGE]: "正在留痕结果列表",
+  [AUTOMATION_STATES.READING_RESULT_ROWS]: "正在读取结果",
   [AUTOMATION_STATES.OPENING_DETAIL]: "正在打开结果详情",
   [AUTOMATION_STATES.CAPTURING_DETAIL]: "正在留痕结果详情",
-  [AUTOMATION_STATES.RETURNING_TO_LIST]: "正在返回第一页结果列表",
-  [AUTOMATION_STATES.VERIFYING_LIST_STATE]: "正在校验第一页结果状态",
+  [AUTOMATION_STATES.RETURNING_TO_LIST]: "正在返回结果列表",
+  [AUTOMATION_STATES.VERIFYING_LIST_STATE]: "正在校验结果状态",
+  [AUTOMATION_STATES.ADVANCING_PAGE]: "正在前往下一结果页",
   [AUTOMATION_STATES.FIRST_PAGE_COMPLETE]: "第 1 页已完整处理",
+  [AUTOMATION_STATES.PARTIAL_COMPLETE]: "已完成部分分页核查",
   [AUTOMATION_STATES.PAUSED]: "自动核查已暂停",
   [AUTOMATION_STATES.FAILED]: "自动核查失败",
   [AUTOMATION_STATES.DONE]: "查询与留痕已完成",
 };
 /**
- * 未完成的第一页核查：显示真实进度，并把「继续本次核查」作为主要动作。
- * 继续沿用同一个 Query 与同一份已完成留痕，不会从第 1 条重新开始。
+ * 未完成的核查（当前只有第 1 页会给出「继续本次核查」）：显示真实进度，
+ * 并把它作为主要动作。继续沿用同一个 Query 与同一份已完成留痕，
+ * 不会从第 1 条重新开始。
  */
-function firstPageProgressLines(view) {
+function unfinishedProgressLines(view) {
+  const pageNo = view.currentPage ?? 1;
   const lines = [
     "本次核查未完成",
     view.listCaptureComplete
-      ? "✓ 第 1 页列表：已留痕"
-      : "◦ 第 1 页列表：待留痕",
+      ? `✓ 第 ${pageNo} 页列表：已留痕`
+      : `◦ 第 ${pageNo} 页列表：待留痕`,
     `详情：${view.completedDetailCount} / ${view.expectedDetailCount}`,
     `已生成留痕：${view.generatedCaptureCount}`,
   ];
@@ -265,7 +271,7 @@ function renderAutomation() {
     automationBusy || $("task").value !== automationJob.taskId;
   $("automation-resume-block").hidden = !resumable;
   $("automation-resume-block").textContent = resumable
-    ? firstPageProgressLines(progress).join("\n")
+    ? unfinishedProgressLines(progress).join("\n")
     : "";
   $("automation-dismiss").hidden = false;
   $("automation-dismiss").disabled = automationBusy;
@@ -273,27 +279,49 @@ function renderAutomation() {
     ? "放弃本次核查"
     : "返回手工模式";
   const lines = [];
+  const currentPage = progress.currentPage ?? 1;
+  const totalPages = progress.totalPages;
   if (automationJob.state === AUTOMATION_STATES.DONE) {
+    if (progress.completedPageCount > 0) {
+      // 真的处理过结果页：不能再说“未发现相关结果 / 已生成 1 份留痕”。
+      lines.push(
+        "✓ 查询完成",
+        `✓ 已自动处理到第 ${currentPage} 页（网站共 ${totalPages} 页）`,
+        `✓ 本次新增留痕：${progress.completedPageCaptureCount}`,
+        `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
+      );
+    } else {
+      lines.push(
+        "✓ 查询完成",
+        "✓ 未发现相关结果",
+        "✓ 已生成 1 份留痕",
+        `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
+        `留痕：${automationJob.filename || "已归档"}`,
+      );
+    }
+  } else if (progress.partialComplete) {
+    // 正常的部分完成：不是错误、也不是运行中，只是本轮不再继续翻页。
     lines.push(
-      "✓ 查询完成",
-      "✓ 未发现相关结果",
-      "✓ 已生成 1 份留痕",
-      `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
-      `留痕：${automationJob.filename || "已归档"}`,
+      `已自动处理第 1–${currentPage} 页`,
+      `网站共 ${totalPages} 页`,
+      `✓ 本次新增留痕：${progress.completedPageCaptureCount}`,
+      "后续分页暂未自动执行。请人工继续核查。",
     );
   } else if (progress.firstPageComplete) {
     lines.push(
-      "第 1 页已完整处理",
+      `第 ${currentPage} 页已完整处理`,
       "✓ 结果列表：1 / 1",
       `✓ 详情：${progress.completedDetailCount} / ${progress.expectedDetailCount}`,
       `✓ 本页新增留痕：${progress.completedDetailCount + 1}`,
     );
-    const totalPages = progress.totalPages;
     if (totalPages)
-      lines.push("当前已自动处理：第 1 页", `网站结果页：共 ${totalPages} 页`);
+      lines.push(
+        `当前已自动处理：第 ${currentPage} 页`,
+        `网站结果页：共 ${totalPages} 页`,
+      );
     lines.push("后续分页暂未自动执行。请人工继续核查。");
-  } else if (progress.firstPageProcessing) {
-    lines.push("正在处理第 1 页");
+  } else if (progress.currentPageProcessing) {
+    lines.push(`正在处理第 ${currentPage} 页`);
     lines.push(
       progress.listCaptureComplete ? "✓ 列表留痕已完成" : "◦ 列表留痕待完成",
     );

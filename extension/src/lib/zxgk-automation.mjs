@@ -11,7 +11,6 @@ import {
 import {
   buildRowKey,
   evaluateDetailIdentity,
-  freezePageOneRows,
   freezePageRows,
   isZxgkExecutionPage,
   locateRowKey,
@@ -137,10 +136,15 @@ function validatePageModel(job) {
         "ADVANCE_PAGE_MISSING",
         "ADVANCING_PAGE 必须存在 currentPage。",
       );
-    if (!completedPages.some((item) => item?.pageNo === currentPage))
+    // 必须真的持有跳页 intent：后台没有任何待结算动作却停在 ADVANCING_PAGE，
+    // 就是一个假的"处理中"状态（重启后也无从判断该继续做什么）。
+    // intent 自身的合法性全部由通用的 operation 校验覆盖，这里不重复实现：
+    // 源页号 = OPERATION_PAGE_INVALID、目标页号 = PAGE_ADVANCE_TARGET_INVALID、
+    // 源页已完成 = PAGE_ADVANCE_SOURCE_INCOMPLETE。
+    if (job.currentOperation?.type !== "PAGE_ADVANCE")
       return invalidJob(
-        "ADVANCE_PAGE_NOT_COMPLETED",
-        "ADVANCING_PAGE 时源页必须已经完成。",
+        "ADVANCE_OPERATION_MISSING",
+        "ADVANCING_PAGE 必须存在 PAGE_ADVANCE 操作。",
       );
   }
   // 只有真正带多页标记的 DONE 才受多页约束：M8.1 / M8.2a 的 NO_RESULT DONE 没有页标记。
@@ -155,6 +159,35 @@ function validatePageModel(job) {
       );
     if (job.currentOperation)
       return invalidJob("DONE_OPERATION_ACTIVE", "DONE 时不应存在未结算操作。");
+  }
+
+  // 部分完成：连续页前缀 1..currentPage 已完整处理，但网站仍有未处理页。
+  // 页数未知或已到最后一页都不成立——后者必须写成 DONE，不能谎称部分完成。
+  // （PARTIAL_COMPLETE 与 legacy firstPageComplete 并存的情况已被上面的
+  // COMPLETE_STATE_MISMATCH 拒绝，这里不再重复一套同义校验。）
+  if (job.state === AUTOMATION_STATES.PARTIAL_COMPLETE) {
+    if (currentPage == null || totalPages == null)
+      return invalidJob(
+        "PARTIAL_PAGE_MISSING",
+        "PARTIAL_COMPLETE 必须同时存在 currentPage 与 totalPages。",
+      );
+    if (currentPage >= totalPages)
+      return invalidJob(
+        "PARTIAL_PAGE_EXHAUSTED",
+        "最后一页已全部处理时必须 DONE，不能是 PARTIAL_COMPLETE。",
+      );
+    // completedPages 的连续性与字段合法性已在上面的循环里校验，这里只补
+    // "必须连续覆盖到 currentPage"这一条。
+    if (completedPages.length !== currentPage)
+      return invalidJob(
+        "PARTIAL_PAGES_INCOMPLETE",
+        "PARTIAL_COMPLETE 的 completedPages 必须连续覆盖到 currentPage。",
+      );
+    if (job.currentOperation)
+      return invalidJob(
+        "PARTIAL_OPERATION_ACTIVE",
+        "PARTIAL_COMPLETE 时不应存在未结算操作。",
+      );
   }
 
   return null;
@@ -562,11 +595,14 @@ function sameTaskContext(task, job) {
 /**
  * 列表操作的进度记录。默认形状与详情保持一致的四个身份字段；
  * 只有需要承载“Capture 已成功”这类收尾信息时才追加字段。
+ *
+ * pageNo 必填、刻意不给默认值：operation 永远属于调用时的当前页，漏传参数会静默
+ * 退化成第 1 页，从而在第 2 页触发 OPERATION_PAGE_INVALID。
  */
-function listOperation(phase, extra = null) {
+function listOperation(pageNo, phase, extra = null) {
   const operation = {
     type: "LIST",
-    pageNo: FIRST_PAGE_NO,
+    pageNo,
     rowKey: null,
     caseNo: null,
     phase,
@@ -574,10 +610,11 @@ function listOperation(phase, extra = null) {
   return extra ? { ...operation, ...extra } : operation;
 }
 
-function detailOperation(row, phase) {
+/** 同上：detailOperation 的 pageNo 同样必填，理由与 listOperation 一致。 */
+function detailOperation(pageNo, row, phase) {
   return {
     type: "DETAIL",
-    pageNo: FIRST_PAGE_NO,
+    pageNo,
     rowKey: buildRowKey(row),
     caseNo: row.caseNo,
     phase,
@@ -672,8 +709,15 @@ export function createZxgkAutomation(dependencies) {
         topic: task.topic,
         sourceName: task.source_name,
         sourceUrl: task.source_url,
-        // 新一轮从第 1 页第 1 条开始：清掉上一轮遗留的第一页进度，
-        // 但 Query 仍然复用同一个检索词。
+        // 新一轮从第 1 页第 1 条开始：清掉上一轮遗留的全部分页进度，**包含页坐标
+        // 本身**——否则上一轮停在第 2 页的 currentPage / 冻结集合会污染新一轮
+        // （normalize 会沿用显式页坐标，pageCompleteness(job, 1) 立刻不成立）。
+        // Query 仍然复用同一个检索词。
+        currentPage: FIRST_PAGE_NO,
+        totalPages: null,
+        completedPages: [],
+        pageFrozenKeys: null,
+        currentPageRows: null,
         resultPage: null,
         expectedDetailCount: null,
         pageOneRowKeys: null,
@@ -758,15 +802,19 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * 第一页列表留痕。只有列表留痕完整成功，才会开始处理详情。
+   * 当前页的结果列表留痕（页泛化）。只有列表留痕完整成功，才会开始处理该页详情。
    * 已经成功留痕过的列表在继续本次核查时不会重复生成。
+   *
+   * 每一页都必须有一份独立的列表留痕：进入新页时 listCapture 已被清空，
+   * 因此"第 2 页的 rows 已冻结"不等于"第 2 页列表已留痕"。
    *
    * 与详情使用同一套成功事务语义：Capture 一旦 finalize 成功，立刻把成功
    * captureId 与补记载荷一起落盘，然后才做 verify / 状态收尾。
    */
   async function captureListPage(job) {
+    const pageNo = normalizeAutomationJob(job).currentPage;
     job = await saveState(job, AUTOMATION_STATES.CAPTURING_LIST_PAGE, {
-      currentOperation: listOperation(AUTOMATION_PHASES.CAPTURING),
+      currentOperation: listOperation(pageNo, AUTOMATION_PHASES.CAPTURING),
     });
     let archived;
     try {
@@ -779,7 +827,7 @@ export function createZxgkAutomation(dependencies) {
     // 成功事务：这一步先把成功标记落盘。即使随后在等待验证或返回列表时中断，
     // 继续本次核查也能凭 captureId 确认列表已经留痕，不会重复 Capture。
     job = await saveState(job, AUTOMATION_STATES.CAPTURING_LIST_PAGE, {
-      currentOperation: listOperation(AUTOMATION_PHASES.CAPTURING, {
+      currentOperation: listOperation(pageNo, AUTOMATION_PHASES.CAPTURING, {
         captureId: archived.capture.id,
         capture: archived.capture,
         filename: archived.filename,
@@ -788,17 +836,14 @@ export function createZxgkAutomation(dependencies) {
     return settlePendingListCapture(job, job.currentOperation);
   }
 
-  /** 返回列表后必须复核仍是第 1 页，且冻结的目标集合仍全部可定位。 */
+  /** 返回列表后必须复核仍在当前页，且冻结的目标集合仍全部可定位。 */
   async function verifyListState(job, expectedRowKeys) {
+    const pageNo = normalizeAutomationJob(job).currentPage;
     job = await saveState(job, AUTOMATION_STATES.VERIFYING_LIST_STATE, {
-      currentOperation: listOperation(AUTOMATION_PHASES.VERIFYING),
+      currentOperation: listOperation(pageNo, AUTOMATION_PHASES.VERIFYING),
     });
     const snapshot = await dependencies.readResultPage(job.tabId);
-    const reconciled = reconcileRowKeys(
-      expectedRowKeys,
-      snapshot,
-      FIRST_PAGE_NO,
-    );
+    const reconciled = reconcileRowKeys(expectedRowKeys, snapshot, pageNo);
     if (!reconciled.ok) throw stop(job, reconciled.error);
     return saveState(job, AUTOMATION_STATES.VERIFYING_LIST_STATE, {
       currentOperation: null,
@@ -867,22 +912,33 @@ export function createZxgkAutomation(dependencies) {
     return saveState(job, job.state, { currentOperation: null });
   }
 
-  /** 逐条处理详情：定位 → 打开 → 校验身份 → 留痕 → 返回 → 复核。 */
+  /**
+   * 逐条处理详情：定位 → 打开 → 校验身份 → 留痕 → 返回 → 复核。
+   * 页泛化：定位与返回复核都只认 normalize 后的当前页与当前页冻结集合，
+   * 绝不读 legacy pageOneRowKeys（否则第 2 页会拿第 1 页的集合做复核）。
+   */
   async function captureDetailRow(job, row) {
     const rowKey = buildRowKey(row);
+    const normalized = normalizeAutomationJob(job);
+    const pageNo = normalized.currentPage;
+    const frozenKeys = normalized.pageFrozenKeys;
     const pending = job.currentOperation;
     // 防御：万一在“Capture 已成功但尚未补记进度”的窗口进入本条，先补记。
     if (pending?.captureId && pending.rowKey === rowKey)
       job = await settlePendingCapture(job, pending);
     if ((job.completedDetailKeys || []).includes(rowKey)) return job;
     job = await saveState(job, AUTOMATION_STATES.OPENING_DETAIL, {
-      currentOperation: detailOperation(row, AUTOMATION_PHASES.LOCATING),
+      currentOperation: detailOperation(
+        pageNo,
+        row,
+        AUTOMATION_PHASES.LOCATING,
+      ),
     });
     const snapshot = await dependencies.readResultPage(job.tabId);
-    const located = locateRowKey(snapshot, rowKey, FIRST_PAGE_NO);
+    const located = locateRowKey(snapshot, rowKey, pageNo);
     if (!located.ok) throw stop(job, located.error);
     job = await saveState(job, AUTOMATION_STATES.OPENING_DETAIL, {
-      currentOperation: detailOperation(row, AUTOMATION_PHASES.OPENING),
+      currentOperation: detailOperation(pageNo, row, AUTOMATION_PHASES.OPENING),
     });
     let opened;
     try {
@@ -893,7 +949,7 @@ export function createZxgkAutomation(dependencies) {
     if (!opened?.detailTabId) throw stop(job, "未能打开该条结果的详情标签页。");
     job = await saveState(job, AUTOMATION_STATES.OPENING_DETAIL, {
       currentOperation: {
-        ...detailOperation(row, AUTOMATION_PHASES.OPENING),
+        ...detailOperation(pageNo, row, AUTOMATION_PHASES.OPENING),
         detailTabId: opened.detailTabId,
       },
     });
@@ -907,7 +963,7 @@ export function createZxgkAutomation(dependencies) {
     if (!verified.ok) throw stop(job, verified.error);
     job = await saveState(job, AUTOMATION_STATES.CAPTURING_DETAIL, {
       currentOperation: {
-        ...detailOperation(row, AUTOMATION_PHASES.CAPTURING),
+        ...detailOperation(pageNo, row, AUTOMATION_PHASES.CAPTURING),
         detailTabId: opened.detailTabId,
       },
     });
@@ -926,7 +982,7 @@ export function createZxgkAutomation(dependencies) {
     // 或后台在此时中断，继续本次核查时也不会重复留痕这一条。
     job = await saveState(job, AUTOMATION_STATES.RETURNING_TO_LIST, {
       currentOperation: {
-        ...detailOperation(row, AUTOMATION_PHASES.RETURNING),
+        ...detailOperation(pageNo, row, AUTOMATION_PHASES.RETURNING),
         detailTabId: opened.detailTabId,
         captureId: archived.capture.id,
       },
@@ -949,33 +1005,43 @@ export function createZxgkAutomation(dependencies) {
     }
     job = await saveState(job, AUTOMATION_STATES.VERIFYING_LIST_STATE, {
       currentOperation: {
-        ...detailOperation(row, AUTOMATION_PHASES.VERIFYING),
+        ...detailOperation(pageNo, row, AUTOMATION_PHASES.VERIFYING),
         detailTabId: null,
         captureId: archived.capture.id,
       },
     });
     const afterReturn = await dependencies.readResultPage(job.tabId);
-    const reconciled = reconcileRowKeys(
-      job.pageOneRowKeys,
-      afterReturn,
-      FIRST_PAGE_NO,
-    );
+    const reconciled = reconcileRowKeys(frozenKeys, afterReturn, pageNo);
     if (!reconciled.ok) throw stop(job, reconciled.error);
-    // 只有留痕成功且确认回到第一页之后，才记为已完成。
+    // 只有留痕成功且确认回到当前页之后，才记为已完成。
     return saveState(job, AUTOMATION_STATES.VERIFYING_LIST_STATE, {
       completedDetailKeys: [...(job.completedDetailKeys || []), rowKey],
       currentOperation: null,
     });
   }
 
-  /** 第 1 页完成条件：列表 + N 个唯一详情 + 无残留操作（与多页共用同一判定）。 */
+  /**
+   * M8.2a legacy 终态：第 1 页完成条件（列表 + N 个唯一详情 + 无残留操作）。
+   *
+   * 只由「继续本次核查」的第 1 页路径产生；全新核查走 page-run driver
+   * （finishPageRun 决定 DONE / PARTIAL_COMPLETE），因此新产品路径不再写
+   * FIRST_PAGE_COMPLETE。
+   */
   async function firstPageCompleteness(job) {
     const complete = pageCompleteness(job, FIRST_PAGE_NO);
     if (!complete.ok) throw stop(job, complete.reason);
-    // FIRST_PAGE_COMPLETE 不是 DONE：网站可能还有第 2 页及以后，本轮不翻页。
+    // FIRST_PAGE_COMPLETE 不是 DONE：网站可能还有第 2 页及以后，本路径不翻页。
+    // completedPages 必须一起落盘：start() 已经把它重置为空，只写 firstPageComplete
+    // 会让"第 1 页已完成"的事实只存在于 legacy 标记里。
     return saveState(job, AUTOMATION_STATES.FIRST_PAGE_COMPLETE, {
       currentOperation: null,
       error: null,
+      completedPages: pageCompleteSummary(
+        job,
+        normalizeAutomationJob(job),
+        FIRST_PAGE_NO,
+        dependencies.now().toISOString(),
+      ),
       firstPageComplete: {
         pageNo: FIRST_PAGE_NO,
         totalPages: job.resultPage?.totalPages ?? null,
@@ -1104,10 +1170,13 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * 第一页循环：列表尚未留痕则先留痕，再按冻结顺序处理未完成的详情。
-   * 继续本次核查时复用它，因此已完成的列表与详情都不会重复。
+   * 当前页循环（页泛化）：列表尚未留痕则先留痕，再按冻结顺序处理该页未完成的详情。
+   *
+   * 第 1 页与第 2 页共用这一份实现，「继续本次核查」也复用它，因此已完成的列表与
+   * 详情都不会重复。它只负责把**当前页**处理完，不决定本轮终态——终态由调用方决定
+   * （全新核查走 runPageRun/finishPageRun，legacy 第 1 页续跑走 firstPageCompleteness）。
    */
-  async function runFirstPageLoop(job, rows) {
+  async function runCurrentPageLoop(job, rows) {
     // 兜底：即使调用方漏了收尾，只要 currentOperation 带着成功的 captureId，
     // 就只补记 listCapture，绝不重新 Capture 列表。
     if (
@@ -1118,37 +1187,116 @@ export function createZxgkAutomation(dependencies) {
       job = await settlePendingListCapture(job, job.currentOperation);
     if (!job.listCapture) {
       job = await captureListPage(job);
-      job = await verifyListState(job, job.pageOneRowKeys);
+      job = await verifyListState(
+        job,
+        normalizeAutomationJob(job).pageFrozenKeys,
+      );
     }
     for (const row of rows) job = await captureDetailRow(job, row);
-    return firstPageCompleteness(job);
+    return job;
   }
 
-  /** 全新的第一页核查：重新读取并冻结第 1 页目标集合。 */
-  async function captureFirstPage(job) {
+  /**
+   * 全新的核查：读取并冻结第 1 页目标集合，然后交给 page-run driver
+   * （第 1 页 → 最多一次跳页 → 第 2 页 → 终态）。
+   */
+  async function captureCurrentPage(job) {
     job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
       result: AUTOMATION_RESULT.HAS_RESULT,
       error: null,
-      currentOperation: listOperation(AUTOMATION_PHASES.LOCATING),
+      currentOperation: listOperation(
+        FIRST_PAGE_NO,
+        AUTOMATION_PHASES.LOCATING,
+      ),
     });
     const snapshot = await dependencies.readResultPage(job.tabId);
-    const frozen = freezePageOneRows(snapshot);
+    const frozen = freezePageRows(snapshot, FIRST_PAGE_NO);
     if (!frozen.ok) throw stop(job, frozen.error);
     job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
+      // 页模型与 legacy 字段同时写：全新核查必然在第 1 页，legacy 字段不撒谎，
+      // 而「继续本次核查」的判定仍然依赖 pageOneRowKeys。
+      currentPage: FIRST_PAGE_NO,
+      totalPages: snapshot.page?.totalPages ?? null,
       resultPage: {
         pageNo: FIRST_PAGE_NO,
         totalPages: snapshot.page?.totalPages ?? null,
         totalSize: snapshot.page?.totalSize ?? null,
       },
-      expectedDetailCount: frozen.rows.length,
+      pageFrozenKeys: frozen.keys,
+      currentPageRows: frozen.rows,
       pageOneRowKeys: frozen.keys,
+      expectedDetailCount: frozen.rows.length,
       completedDetailKeys: [],
       detailCaptures: [],
       listCapture: null,
       listFilename: null,
       currentOperation: null,
     });
-    return runFirstPageLoop(job, frozen.rows);
+    return runPageRun(job, frozen.rows);
+  }
+
+  /**
+   * 两页执行（M8.2b Slice 3B）：第 1 页 → 最多一次跳页 → 第 2 页 → 终态。
+   *
+   * 这里**没有**分页循环、没有执行次数上限、也没有任何运行期计数器：控制流里只有
+   * 一个 advancePage 调用点，因此结构上不可能进入第 3 页。是否离开第 1 页只由页面
+   * 事实决定（本站是否还有后续结果页），而不是由开发阶段或页数常量决定。
+   */
+  async function runPageRun(job, rows) {
+    job = await runCurrentPageLoop(job, rows);
+    const first = normalizeAutomationJob(job);
+    // 第 1 页就是最后一页：本站已经全部处理完，不需要也不允许跳页。
+    if (
+      Number.isInteger(first.totalPages) &&
+      first.currentPage >= first.totalPages
+    )
+      return finishPageRun(job);
+    // 唯一的 Page 1 → Page 2 transition：advancePage 内部绝不重试、绝不循环。
+    job = await advancePage(job);
+    const nextRows = normalizeAutomationJob(job).currentPageRows;
+    return finishPageRun(await runCurrentPageLoop(job, nextRows));
+  }
+
+  /**
+   * 一轮执行的终态：页耗尽 → DONE；否则是正常的连续页前缀完成 → PARTIAL_COMPLETE。
+   *
+   * 当前页的完成检查点与终态必须在**同一次写入**里落盘：只写一半的中间状态会同时
+   * 违反冻结集合与 completedPages 的 invariant（页内态不允许当前页已完成）。
+   */
+  async function finishPageRun(job) {
+    const normalized = normalizeAutomationJob(job);
+    const currentPage = normalized.currentPage;
+    const totalPages = normalized.totalPages;
+    const complete = pageCompleteness(job, currentPage);
+    if (!complete.ok) throw stop(job, complete.reason);
+    // 页数未知时既不能证明"还有后续页"，也不能证明"已到最后一页"，只能 fail closed。
+    // 正常路径不会走到这里：需要跳页时，跳页协议的前置条件已经先拦住这一种情况。
+    if (!Number.isInteger(totalPages) || totalPages < 1)
+      throw stop(
+        job,
+        "结果总页数尚未建立 baseline，无法确认本站是否还有后续页。",
+      );
+    const completedPages = pageCompleteSummary(
+      job,
+      normalized,
+      currentPage,
+      dependencies.now().toISOString(),
+    );
+    return saveState(
+      job,
+      currentPage >= totalPages
+        ? AUTOMATION_STATES.DONE
+        : AUTOMATION_STATES.PARTIAL_COMPLETE,
+      {
+        currentOperation: null,
+        error: null,
+        errorCode: null,
+        firstPageComplete: null,
+        currentPage,
+        totalPages,
+        completedPages,
+      },
+    );
   }
 
   /**
@@ -1177,7 +1325,10 @@ export function createZxgkAutomation(dependencies) {
     // 上一轮若中断在“Capture 已成功、但尚未补记进度”的窗口，这里补记：
     // 列表靠 captureId 直接补记 listCapture，详情靠 captureId 补记完成项。
     job = await settlePendingOperation(job, pending);
-    return runFirstPageLoop(job, reconciled.rows);
+    job = await runCurrentPageLoop(job, reconciled.rows);
+    // 「继续本次核查」仍然只处理第 1 页：它不接两页 driver，也绝不自动翻页。
+    // 跨页 fresh resume（重建查询环境、重新人工验证后再跳页）是独立切片，本轮不做。
+    return firstPageCompleteness(job);
   }
 
   async function continueAfterVerification({ taskId }) {
@@ -1211,10 +1362,10 @@ export function createZxgkAutomation(dependencies) {
       });
       job = await ensureQuery(job);
       if (result === AUTOMATION_RESULT.HAS_RESULT) {
-        // 已有第一页进度 = 继续本次核查；否则才是全新的第一页核查。
+        // 已有第一页进度 = 继续本次核查；否则才是全新的核查（第 1 页 → 第 2 页）。
         return job.pageOneRowKeys?.length
           ? await resumeFirstPage(job)
-          : await captureFirstPage(job);
+          : await captureCurrentPage(job);
       }
       job = await saveState(job, AUTOMATION_STATES.CAPTURING_NO_RESULT);
       const captureTab = await dependencies.getTab(job.tabId);
