@@ -296,20 +296,61 @@ export function normalizeRowText(value) {
 }
 
 /**
+ * 详情身份令牌（detailIdentity）——结果行身份契约的第三个字段。
+ *
+ * 站点事实（真实 `index.html` 的结果行模板）：
+ *
+ *   <a href="javascript:void(0)" class="View" id="{result.id}"
+ *      onclick="openZhcxDetail('{pname}','{caseCode}','{dePartyCardNum}');">查看</a>
+ *
+ * `openZhcxDetail` 的第三个实参在站点内部叫 `dePartyCardNum`，但对本项目它是
+ * **不透明令牌**：我们不解释、不校验、不推断它的语义，只用它区分「姓名与案号
+ * 完全相同、但确实是两条不同结果」的行。因此产品模型里命名为 detailIdentity，
+ * 绝不沿用站点内部名。
+ *
+ * 真人事实（2026-09-17，ZXGK 执行页第 3/21 页）：
+ * - 真实结果行的立案时间可以为空（`formatCaseCreateTime("")` 返回 `""`），
+ *   但姓名、案号、详情身份三者齐全 —— 因此 filingDate 只能是可选字段；
+ * - 第 3/5 条与第 6/8 条显示字段完全相同，只有**第三个实参不同**，
+ *   且 fresh query 后该差异逐项保持一致。
+ *
+ * 只读解析：不 eval、不 new Function、不执行 onclick 字符串，只匹配固定结构。
+ * 结构不匹配（含任何引号注入尝试）一律 fail closed，绝不回退到行号等猜测。
+ */
+export function parseDetailIdentity(onclick) {
+  // 单引号定界、三段实参；`[^']*` 保证任何内嵌引号都无法通过匹配。
+  const pattern =
+    /^\s*openZhcxDetail\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)\s*;?\s*$/;
+  const match = pattern.exec(String(onclick ?? ""));
+  if (!match)
+    return { ok: false, error: "无法从“查看”链接的 onclick 解析出详情身份。" };
+  const [, name, caseNo, detailIdentity] = match;
+  if (!normalizeRowText(name) || !normalizeRowText(caseNo))
+    return { ok: false, error: "“查看”链接的 onclick 缺少姓名或案号。" };
+  if (!normalizeRowText(detailIdentity))
+    return { ok: false, error: "“查看”链接的 onclick 详情身份为空。" };
+  return { ok: true, name, caseNo, detailIdentity };
+}
+
+/**
  * 结果行的稳定运行期身份。只用于本轮 Extension 运行状态，
  * 不写入数据库，也不改变网站展示顺序。
+ *
+ * name|caseNo|detailIdentity 三段都参与身份：
+ * - filingDate **不参与**（真实结果行可以为空）；
+ * - 显示字段相同但 detailIdentity 不同的两条行是两个合法且不同的 occurrence。
  */
 export function buildRowKey(row) {
   return [
     normalizeRowText(row?.name),
     normalizeRowText(row?.caseNo),
-    normalizeRowText(row?.filingDate),
+    normalizeRowText(row?.detailIdentity),
   ].join("|");
 }
 
 /**
  * 从 rowKey 还原案号，仅用于进度展示（例如「下一项」）。
- * rowKey 形如 name|caseNo|filingDate，倒数第二段恒为案号。
+ * rowKey 形如 name|caseNo|detailIdentity，倒数第二段恒为案号。
  */
 export function caseNoFromRowKey(rowKey) {
   const parts = String(rowKey ?? "").split("|");
@@ -317,13 +358,30 @@ export function caseNoFromRowKey(rowKey) {
 }
 
 /**
+ * rowKey 的人类可读标签（姓名 + 案号），只用于面向操作者的提示文案。
+ *
+ * detailIdentity 是不透明令牌：它对操作者没有任何可核对价值（页面上根本看不到），
+ * 因此提示文案只显示操作者能在页面上亲眼比对的字段，绝不把令牌原文写出去。
+ */
+export function describeRowKey(rowKey) {
+  const parts = String(rowKey ?? "").split("|");
+  if (parts.length < 3) return String(rowKey ?? "");
+  const label = [parts[0], parts[parts.length - 2]].filter(Boolean).join(" ");
+  return label || "（未命名结果）";
+}
+
+/**
  * 打开详情时需要在页面内重新计算 rowKey。这里把同一份实现注入页面表达式，
  * 避免 Node 侧与页面侧各写一套导致身份判定分叉。
+ *
+ * 顺序即依赖顺序：parseDetailIdentity / buildRowKey 都依赖 normalizeRowText。
  */
 export const ROW_KEY_SOURCE = String.raw`const normalizeRowText = ${normalizeRowText.toString()};
+const parseDetailIdentity = ${parseDetailIdentity.toString()};
 const buildRowKey = ${buildRowKey.toString()};`;
 
 const rowParserSource = String.raw`
+  ${ROW_KEY_SOURCE}
   const RESULT_HEADERS = ${JSON.stringify(ZXGK_RESULT_HEADERS)};
   const readResultRowEntries = () => {
     const tables = Array.from(document.querySelectorAll("table")).filter(visible);
@@ -337,16 +395,30 @@ const rowParserSource = String.raw`
       if (headerIndex < 0) continue;
       const entries = [];
       for (const row of tableRows.slice(headerIndex + 1)) {
+        // filler contract 不变：没有 a.View 的补齐行永远不是 real row。
         const anchor =
           row.querySelector("a.View") ||
           row.querySelector('a[onclick*="openZhcxDetail"]');
         if (!anchor) continue;
         const cells = Array.from(row.cells).map((cell) => text(cell.innerText));
+        const name = cells[1] || "";
+        const caseNo = cells[3] || "";
+        const parsed = parseDetailIdentity(anchor.getAttribute("onclick"));
+        // 只解析固定结构，然后把「onclick 里的身份」与「列表显示的字段」对齐校验；
+        // 任何不一致都记录成错误交给调用方 fail closed，绝不按行号猜。
+        let identityError = null;
+        if (!parsed.ok) identityError = parsed.error;
+        else if (normalizeRowText(parsed.name) !== normalizeRowText(name))
+          identityError = "“查看”链接中的姓名与列表显示不一致。";
+        else if (normalizeRowText(parsed.caseNo) !== normalizeRowText(caseNo))
+          identityError = "“查看”链接中的案号与列表显示不一致。";
         entries.push({
           serial: cells[0] || "",
-          name: cells[1] || "",
+          name,
           filingDate: cells[2] || "",
-          caseNo: cells[3] || "",
+          caseNo,
+          detailIdentity: parsed.ok ? parsed.detailIdentity : "",
+          identityError,
           label: text(anchor.innerText),
           anchor,
         });
@@ -400,6 +472,8 @@ export function resultRowsExpression() {
         name: entry.name,
         filingDate: entry.filingDate,
         caseNo: entry.caseNo,
+        detailIdentity: entry.detailIdentity,
+        identityError: entry.identityError,
         label: entry.label,
       })),
       page: {
@@ -589,15 +663,24 @@ export function jumpToPageExpression(targetPage) {
   })()`;
 }
 
-/** 打开“查看”前先在页面内按 rowKey 精确定位，定位不到就绝不点击。 */
+/**
+ * 打开「查看」前先在页面内按 rowKey 精确定位，定位不到就绝不点击。
+ *
+ * 这是「显示字段相同、detailIdentity 不同的两条行」能否各自打开自己详情的关键：
+ * rowKey 含 detailIdentity，因此两条行是两个互不相同的匹配；
+ * 若页面把两条行的身份渲染成同一个 rowKey（重复身份），matches 会 > 1 并 fail closed，
+ * 绝不因为「姓名 + 案号相同」而总是点到第一条。
+ */
 export function openDetailExpression(expectedRowKey) {
   const encoded = JSON.stringify(String(expectedRowKey));
   return String.raw`(() => {
     ${sharedDomHelpers}
     ${rowParserSource}
-    ${ROW_KEY_SOURCE}
     const expected = ${encoded};
-    const matches = readResultRowEntries().filter(
+    const entries = readResultRowEntries();
+    if (entries.some((entry) => entry.identityError))
+      return { ok: false, error: "结果列表中有结果无法确定详情身份，未打开详情。" };
+    const matches = entries.filter(
       (entry) => buildRowKey(entry) === expected,
     );
     if (matches.length === 0)
@@ -616,6 +699,7 @@ export function openDetailExpression(expectedRowKey) {
       name: entry.name,
       filingDate: entry.filingDate,
       caseNo: entry.caseNo,
+      detailIdentity: entry.detailIdentity,
     };
   })()`;
 }
@@ -682,6 +766,11 @@ export function closeDetailExpression() {
  * 必须同时满足「分页输入框里的页码」与「页面显示的页码」都等于 expectedPageNo：
  * 只看其中一个都不足以证明当前页，也不能只看 rows 长得像就放过。
  *
+ * 身份字段的 required / optional（2026-09-17 真人事实）：
+ * - required：name、caseNo、detailIdentity；
+ * - optional：filingDate —— 真实结果行的立案时间可以为空（`filingDate === ""` 合法），
+ *   它只是展示用的 metadata，因此既不参与 rowKey，也不作为身份前提。
+ *
  * 这里刻意不判断 observed totalPages 与 runtime baseline 是否一致：任何变化
  * 都会让结果集可能变化，是否 PAUSED 由 orchestration 决定，adapter 只报事实。
  */
@@ -702,13 +791,24 @@ export function validatePage(snapshot, expectedPageNo) {
   if (!snapshot.rows.length)
     return { ok: false, error: `第 ${expectedPageNo} 页没有可解析的结果行。` };
   for (const [index, row] of snapshot.rows.entries()) {
-    if (!row.name || !row.caseNo || !row.filingDate)
+    const position = `第 ${index + 1} 条结果`;
+    if (!row.name || !row.caseNo)
       return {
         ok: false,
-        error: `第 ${index + 1} 条结果缺少姓名、立案时间或案号，无法建立稳定身份。`,
+        error: `${position}缺少姓名或案号，无法建立稳定身份。`,
+      };
+    if (row.identityError)
+      return {
+        ok: false,
+        error: `${position}的详情身份无法确定（${row.identityError}），无法建立稳定身份。`,
+      };
+    if (!row.detailIdentity)
+      return {
+        ok: false,
+        error: `${position}缺少详情身份，无法建立稳定身份。`,
       };
     if (row.label !== "查看")
-      return { ok: false, error: `第 ${index + 1} 条结果的“查看”链接异常。` };
+      return { ok: false, error: `${position}的“查看”链接异常。` };
   }
   return { ok: true };
 }
@@ -721,6 +821,10 @@ export function validateFirstPage(snapshot) {
 /**
  * 冻结指定页的目标集合。rowKey 重复时 fail closed：宁可停下，
  * 也不靠行号猜测该处理哪一条。
+ *
+ * 注意「重复」的唯一判据是完整的 name|caseNo|detailIdentity：
+ * 显示字段相同但 detailIdentity 不同的两条行是合法的两个 occurrence，不会被拒绝，
+ * 也不会被静默去重 —— 两条都必须各自打开并留痕。
  */
 export function freezePageRows(snapshot, expectedPageNo) {
   const validation = validatePage(snapshot, expectedPageNo);
@@ -730,7 +834,7 @@ export function freezePageRows(snapshot, expectedPageNo) {
   if (duplicate)
     return {
       ok: false,
-      error: `第 ${expectedPageNo} 页存在两条完全相同的结果（${duplicate}），无法可靠区分，自动核查已停止。`,
+      error: `第 ${expectedPageNo} 页存在两条身份完全相同的结果（${describeRowKey(duplicate)}），无法可靠区分，自动核查已停止。`,
     };
   return { ok: true, rows: snapshot.rows, keys };
 }
@@ -743,6 +847,8 @@ export function freezePageOneRows(snapshot) {
 /**
  * 在指定页内按 rowKey 精确定位。定位前必须先证明 snapshot 就是 expectedPageNo，
  * 否则会把别的页面上恰好同名的结果当成目标。
+ *
+ * 提示文案只显示姓名 + 案号：detailIdentity 是不透明令牌，对操作者没有可核对价值。
  */
 export function locateRowKey(snapshot, expectedRowKey, expectedPageNo) {
   const validation = validatePage(snapshot, expectedPageNo);
@@ -753,12 +859,12 @@ export function locateRowKey(snapshot, expectedRowKey, expectedPageNo) {
   if (!matches.length)
     return {
       ok: false,
-      error: `结果列表中已找不到待处理结果：${expectedRowKey}。`,
+      error: `结果列表中已找不到待处理结果：${describeRowKey(expectedRowKey)}。`,
     };
   if (matches.length > 1)
     return {
       ok: false,
-      error: `结果列表中出现多个相同结果：${expectedRowKey}。`,
+      error: `结果列表中出现多个相同结果：${describeRowKey(expectedRowKey)}。`,
     };
   return { ok: true, row: matches[0] };
 }
@@ -772,7 +878,7 @@ export function reconcileRowKeys(expectedRowKeys, snapshot, expectedPageNo) {
   if (missing.length)
     return {
       ok: false,
-      error: `返回结果列表后已无法定位以下结果：${missing.join("；")}。`,
+      error: `返回结果列表后已无法定位以下结果：${missing.map(describeRowKey).join("；")}。`,
     };
   return { ok: true };
 }
@@ -783,6 +889,10 @@ export function reconcileRowKeys(expectedRowKeys, snapshot, expectedPageNo) {
  *
  * 不新增、不减少、不重复；任何不一致都 fail closed，绝不尝试合并两次结果集。
  * 返回按原冻结顺序排列的结果行，因此继续时仍按 rowKey 身份处理，而不是按行号。
+ *
+ * fresh resume 的同名事实（2026-09-17 真人确认）：同一 name/caseNo/detailIdentity
+ * 在 fresh query 之后仍然逐项一致，因此这里可以直接按 rowKey 对账；
+ * 只要 detailIdentity 变了，对账就失败并 fail closed —— 绝不自动重写已冻结的集合。
  */
 export function reconcileFrozenSet(expectedRowKeys, snapshot, expectedPageNo) {
   const validation = validatePage(snapshot, expectedPageNo);
@@ -792,26 +902,39 @@ export function reconcileFrozenSet(expectedRowKeys, snapshot, expectedPageNo) {
   if (duplicate)
     return {
       ok: false,
-      error: `当前第 ${expectedPageNo} 页出现重复结果（${duplicate}），无法可靠继续，本次自动核查已停止。`,
+      error: `当前第 ${expectedPageNo} 页出现重复结果（${describeRowKey(duplicate)}），无法可靠继续，本次自动核查已停止。`,
     };
   const available = new Set(keys);
   const missing = expectedRowKeys.filter((key) => !available.has(key));
   if (missing.length)
     return {
       ok: false,
-      error: `结果集合已变化：当前第 ${expectedPageNo} 页已找不到以下结果：${missing.join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
+      error: `结果集合已变化：当前第 ${expectedPageNo} 页已找不到以下结果：${missing.map(describeRowKey).join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
     };
   const frozen = new Set(expectedRowKeys);
   const extra = keys.filter((key) => !frozen.has(key));
   if (extra.length)
     return {
       ok: false,
-      error: `结果集合已变化：当前第 ${expectedPageNo} 页出现新的结果：${extra.join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
+      error: `结果集合已变化：当前第 ${expectedPageNo} 页出现新的结果：${extra.map(describeRowKey).join("；")}。本次自动核查已停止，请人工核对后再决定是否重新核查。`,
     };
   const byKey = new Map(snapshot.rows.map((row) => [buildRowKey(row), row]));
   return { ok: true, rows: expectedRowKeys.map((key) => byKey.get(key)) };
 }
 
+/**
+ * 校验当前打开的详情页确实属于正在处理的那一条结果。
+ *
+ * 可校验范围（2026-09-17 复核 detail.html 后的真实边界）：
+ * - 案号：详情页把「案号」渲染成独立一行，可以精确比对；
+ * - 姓名：详情页正文里必须出现主体名称；
+ * - **detailIdentity 不参与**：它只存在于列表页 a.View 的 onclick 里，详情页并不
+ *   展示它，因此这里既不读它、也不假装能校验它；
+ * - 立案时间同样不参与：它可以是空串，且不是身份字段。
+ *
+ * 也就是说「该打开哪一条」的精确性由列表页那一侧负责（openDetailExpression 用
+ * 含 detailIdentity 的 rowKey 定位并点击），详情页这一侧只做案号 + 姓名的归属确认。
+ */
 export function evaluateDetailIdentity(expected, observed) {
   if (observed?.closed)
     return { ok: false, error: "详情标签页在生成留痕前被关闭，未生成留痕。" };

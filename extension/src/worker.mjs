@@ -469,7 +469,7 @@ chrome.storage.local.get("automationJob").then(({ automationJob }) => {
       ...automationJob,
       state: AUTOMATION_STATES.FAILED,
       error:
-        "扩展后台在自动操作期间中断，无法确认上一步是否完成。已生成的 Query 与留痕全部保留，可在 Side Panel 中「继续本次核查」。",
+        "扩展后台在自动操作期间中断，无法确认上一步是否完成。已生成的 Query 与留痕全部保留，可在 Side Panel 中「继续剩余分页核查」。",
       updatedAt: new Date().toISOString(),
     },
   });

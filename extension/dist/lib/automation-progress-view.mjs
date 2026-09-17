@@ -61,7 +61,8 @@ export function deriveZxgkAutomationProgressViewModel(job) {
     waitingForHumanVerification:
       job?.state === AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION,
     canContinue: canRecheckAutomation(job),
-    // 可继续的 checkpoint 不再限于第 1 页，但恢复目标只可能是第 1 / 第 2 页。
+    // 可继续的 checkpoint 不再限于第 1 页：Slice 5 起恢复目标就是 persisted 的当前页，
+    // 任意页都可以安全 resume；legacy 的 PARTIAL_COMPLETE 同样是一个可继续的检查点。
     canResume: canResumeAutomation(job),
     resumeTargetPage: resumeTarget.ok ? resumeTarget.targetPage : null,
     currentPageProcessing: currentPageProcessingStates.has(job?.state),

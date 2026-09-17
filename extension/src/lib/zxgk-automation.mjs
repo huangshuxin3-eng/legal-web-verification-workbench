@@ -55,8 +55,18 @@ export const VERIFICATION_WIDGET_UNAVAILABLE_CODE =
 export const VERIFICATION_WIDGET_NOT_OBSERVED_CODE =
   "VERIFICATION_WIDGET_NOT_OBSERVED";
 
-/** 本轮 fresh resume 只允许把第 1 页恢复到第 2 页，绝不泛化到任意后续页。 */
-const RESUMABLE_SECOND_PAGE_NO = FIRST_PAGE_NO + 1;
+/**
+ * 分页只有两个动作，语义严格不同（M8.2b Slice 5）：
+ *
+ * - **business advance**：`advancePage` 的 Page N → N+1 transition。它代表业务进度，
+ *   必须先把"源页已完成、准备离开"落盘（PAGE_ADVANCE intent + completedPages 前移），
+ *   再发出恰好一次跳页动作，然后用页面事实证明目标页并冻结它。
+ * - **locate jump**：`locateToCheckpoint` 的"把页面挪到 checkpoint 页"。它不代表
+ *   任何业务进度：不写 intent、不动 completedPages、不产生 Capture、也不改 persisted
+ *   的 currentPage。定位途中崩溃无需补偿——下一次 fresh resume 会重新从第 1 页定位。
+ *
+ * 两者共用同一个网页 primitive，但 dispatch 调用点全文件只有一处（dispatchJumpToPage）。
+ */
 
 /** 有界观察循环的安全上限：即使注入的时钟不前进也一定会结束。 */
 const boundedPolls = (deadlineMs, pollMs) =>
@@ -192,8 +202,10 @@ function validatePageModel(job) {
       return invalidJob("DONE_OPERATION_ACTIVE", "DONE 时不应存在未结算操作。");
   }
 
-  // 部分完成：连续页前缀 1..currentPage 已完整处理，但网站仍有未处理页。
-  // 页数未知或已到最后一页都不成立——后者必须写成 DONE，不能谎称部分完成。
+  // 部分完成（legacy 稳定 checkpoint）：连续页前缀 1..currentPage 已完整处理，但网站仍有
+  // 未处理页。Slice 5 起新核查一律推进到最后一页并写成 DONE，因此这个状态只来自旧版本；
+  // 它仍然是可继续的检查点，但页模型本身必须自洽——页数未知或已到最后一页都不成立，
+  // 后者必须写成 DONE，不能谎称部分完成。
   // （PARTIAL_COMPLETE 与 legacy firstPageComplete 并存的情况已被上面的
   // COMPLETE_STATE_MISMATCH 拒绝，这里不再重复一套同义校验。）
   if (job.state === AUTOMATION_STATES.PARTIAL_COMPLETE) {
@@ -1170,42 +1182,13 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * M8.2a legacy 终态：第 1 页完成条件（列表 + N 个唯一详情 + 无残留操作）。
-   *
-   * 只由「继续本次核查」的第 1 页路径产生；全新核查走 page-run driver
-   * （finishPageRun 决定 DONE / PARTIAL_COMPLETE），因此新产品路径不再写
-   * FIRST_PAGE_COMPLETE。
-   */
-  async function firstPageCompleteness(job) {
-    const complete = pageCompleteness(job, FIRST_PAGE_NO);
-    if (!complete.ok) throw stop(job, complete.reason);
-    // FIRST_PAGE_COMPLETE 不是 DONE：网站可能还有第 2 页及以后，本路径不翻页。
-    // completedPages 必须一起落盘：start() 已经把它重置为空，只写 firstPageComplete
-    // 会让"第 1 页已完成"的事实只存在于 legacy 标记里。
-    return saveState(job, AUTOMATION_STATES.FIRST_PAGE_COMPLETE, {
-      currentOperation: null,
-      error: null,
-      completedPages: pageCompleteSummary(
-        job,
-        normalizeAutomationJob(job),
-        FIRST_PAGE_NO,
-        dependencies.now().toISOString(),
-      ),
-      firstPageComplete: {
-        pageNo: FIRST_PAGE_NO,
-        totalPages: job.resultPage?.totalPages ?? null,
-        detailCount: job.expectedDetailCount,
-        newCaptures: job.expectedDetailCount + 1,
-      },
-    });
-  }
-
-  /**
-   * deterministic 的 Page N → Page N+1 协议（M8.2b Slice 3A）。
+   * deterministic 的 Page N → Page N+1 business transition（M8.2b Slice 3A / Slice 5 泛化）。
    *
    * 只推进一页：绝不循环、绝不自动重试，一次 transition 最多发出一次跳页动作。
    * 是否到达只由页面事实决定——重新读取真实快照并双信号核对，primitive 的返回值
    * 只表示“动作已发出”，从不被当作“已到达”。
+   *
+   * 目标页由 currentPage + 1 决定，因此它对任意 N 都成立，不需要任何页数上限。
    */
   async function advancePage(job) {
     // STEP 1 — 前置条件：任何一项不成立都不发出网站动作，也不写任何状态。
@@ -1277,25 +1260,12 @@ export function createZxgkAutomation(dependencies) {
         );
       const decision = settlePendingPageAdvance(job, snapshot);
       if (decision.outcome === "SETTLED")
-        return saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
-          error: null,
-          errorCode: null,
-          currentPage: targetPage,
-          totalPages: baseline,
-          resultPage: {
-            pageNo: targetPage,
-            totalPages: snapshot.page?.totalPages ?? null,
-            totalSize: snapshot.page?.totalSize ?? null,
-          },
-          // 目标页已冻结：历史页 summary 保留，当前页 rows / keys 换成目标页。
-          currentPageRows: decision.rows,
-          pageFrozenKeys: decision.keys,
-          expectedDetailCount: decision.keys.length,
-          completedDetailKeys: [],
-          detailCaptures: [],
-          listCapture: null,
-          listFilename: null,
-          currentOperation: null,
+        return freezeArrivedPage(job, {
+          pageNo: targetPage,
+          baseline,
+          rows: decision.rows,
+          keys: decision.keys,
+          snapshot,
         });
       if (decision.outcome === "FAILED")
         throw await pauseWith(job, decision.code, decision.error);
@@ -1315,9 +1285,9 @@ export function createZxgkAutomation(dependencies) {
   /**
    * 唯一的跳页 dispatch 调用点（M8.2b Slice 4B）。
    *
-   * 全新核查的 1 → 2 transition 与「继续本次核查」的第 2 页重建都只经过这里，
-   * 因此全文件只有一处 dependencies.jumpToPage：一次执行最多发出一次网站动作，
-   * 结构上不存在“两次动作导致多翻一页”的可能。
+   * business advance 的每一次 transition 与 fresh resume 的每一次 locating 都只经过
+   * 这里，因此全文件只有一处 dependencies.jumpToPage：一次执行最多发出一处网站动作，
+   * 结构上不存在“两个调用点导致多翻一页”的可能。
    *
    * 依赖缺失与动作抛出都只转成结果对象，由调用方按自己的 job 语义 fail closed：
    * 绝不在这里重试，也绝不把“没发出去”当成“已经发出去”。
@@ -1336,11 +1306,70 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
+   * 页面事实已经证明首次到达第 pageNo 页：就地冻结该页并重置页内状态。
+   *
+   * 这是"首次到达这一页"的写入，因此必须把页内状态全部换成新页的：
+   * 历史页 summary 保留，当前页 rows / keys / 已完成详情 / 留痕 / 操作全部重置。
+   *
+   * - 不触碰 pageOneRowKeys：第 1 页的边界指纹是 fresh resume 唯一的可比对身份，
+   *   必须一直保持原样（D1）。
+   * - 不产生任何网站动作，也不写 PAGE_ADVANCE intent。
+   * - business advance 的到达分支与"跳页意图已落盘但页面已到目标页"共用这一份写入。
+   *
+   * 回到"已经处理过一部分的 checkpoint 页"不要用这里——那会把已完成进度清空并导致
+   * 重复留痕，那种场景用 markResumePage。
+   */
+  async function freezeArrivedPage(
+    job,
+    { pageNo, baseline, rows, keys, snapshot },
+  ) {
+    return saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
+      error: null,
+      errorCode: null,
+      currentPage: pageNo,
+      totalPages: baseline,
+      resultPage: {
+        pageNo,
+        totalPages: snapshot.page?.totalPages ?? null,
+        totalSize: snapshot.page?.totalSize ?? null,
+      },
+      currentPageRows: rows,
+      pageFrozenKeys: keys,
+      expectedDetailCount: keys.length,
+      completedDetailKeys: [],
+      detailCaptures: [],
+      listCapture: null,
+      listFilename: null,
+      currentOperation: null,
+    });
+  }
+
+  /**
+   * 回到"已经处理过一部分的 checkpoint 页"时的最小写入：只把"最近一次读取的结果页"
+   * 更新为页面事实，页内进度（冻结集合、已完成详情、列表留痕、详情留痕）原样保留。
+   *
+   * 与 freezeArrivedPage 的区别就是这一点：任何重置都会让已完成的列表与详情再留痕一次。
+   */
+  async function markResumePage(job, pageNo, baseline, snapshot) {
+    return saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
+      error: null,
+      errorCode: null,
+      currentPage: pageNo,
+      totalPages: baseline,
+      resultPage: {
+        pageNo,
+        totalPages: snapshot.page?.totalPages ?? null,
+        totalSize: snapshot.page?.totalSize ?? null,
+      },
+    });
+  }
+
+  /**
    * 当前页循环（页泛化）：列表尚未留痕则先留痕，再按冻结顺序处理该页未完成的详情。
    *
-   * 第 1 页与第 2 页共用这一份实现，「继续本次核查」也复用它，因此已完成的列表与
-   * 详情都不会重复。它只负责把**当前页**处理完，不决定本轮终态——终态由调用方决定
-   * （全新核查走 runPageRun/finishPageRun，legacy 第 1 页续跑走 firstPageCompleteness）。
+   * 每一页（第 1 页到第 N 页）都共用这一份实现，通用分页循环与「继续剩余分页核查」
+   * 也复用它，因此已完成的列表与详情都不会重复。它只负责把**当前页**处理完，不决定
+   * 本轮终态，也不决定是否翻页——那由 runPageRun / advancePage 决定。
    */
   async function runCurrentPageLoop(job, rows) {
     // 兜底：即使调用方漏了收尾，只要 currentOperation 带着成功的 captureId，
@@ -1363,8 +1392,8 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * 全新的核查：读取并冻结第 1 页目标集合，然后交给 page-run driver
-   * （第 1 页 → 最多一次跳页 → 第 2 页 → 终态）。
+   * 全新的核查：读取并冻结第 1 页目标集合，然后交给通用分页循环
+   * （第 1 页 → … → 第 N 页 → DONE）。
    */
   async function captureCurrentPage(job) {
     job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
@@ -1380,7 +1409,7 @@ export function createZxgkAutomation(dependencies) {
     if (!frozen.ok) throw stop(job, frozen.error);
     job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
       // 页模型与 legacy 字段同时写：全新核查必然在第 1 页，legacy 字段不撒谎，
-      // 而「继续本次核查」的判定仍然依赖 pageOneRowKeys。
+      // 而「继续剩余分页核查」的判定仍然依赖 pageOneRowKeys。
       currentPage: FIRST_PAGE_NO,
       totalPages: snapshot.page?.totalPages ?? null,
       resultPage: {
@@ -1402,32 +1431,53 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * 两页执行（M8.2b Slice 3B）：第 1 页 → 最多一次跳页 → 第 2 页 → 终态。
+   * 通用分页执行（M8.2b Slice 5）：唯一的 generic page loop。
    *
-   * 这里**没有**分页循环、没有执行次数上限、也没有任何运行期计数器：控制流里只有
-   * 一个 advancePage 调用点，因此结构上不可能进入第 3 页。是否离开第 1 页只由页面
-   * 事实决定（本站是否还有后续结果页），而不是由开发阶段或页数常量决定。
+   * 语义（每个迭代严格一次）：
+   *   run current page completely
+   *   → 已是最后一页？收尾成 DONE
+   *   → 否则发出**恰好一次** business advance，冻结目标页，再处理紧接的下一结果页
+   *
+   * 刻意没有的东西：页数上限、`maxPagesThisRun` 之类的运行期计数器、"本轮只跑两页"的
+   * 阶段常量、行数 / 分页按钮状态推断末页的启发式、任何自动重试与递归分页。
+   * 是否还有后续页只由页面自报的 totalPages baseline 决定；每一页只有在
+   * pageCompleteness 成立之后才会被离开（由 advancePage 的前置条件强制）。
+   *
+   * 控制流里只有一个 advancePage 调用点，因此一次执行不可能在同一处翻两次页。
    */
   async function runPageRun(job, rows) {
     job = await runCurrentPageLoop(job, rows);
-    const first = normalizeAutomationJob(job);
-    // 第 1 页就是最后一页：本站已经全部处理完，不需要也不允许跳页。
-    if (
-      Number.isInteger(first.totalPages) &&
-      first.currentPage >= first.totalPages
-    )
-      return finishPageRun(job);
-    // 唯一的 Page 1 → Page 2 transition：advancePage 内部绝不重试、绝不循环。
-    job = await advancePage(job);
-    const nextRows = normalizeAutomationJob(job).currentPageRows;
-    return finishPageRun(await runCurrentPageLoop(job, nextRows));
+    for (;;) {
+      const current = normalizeAutomationJob(job);
+      // 页数未知时既不能证明"还有后续页"，也不能证明"已到最后一页"，只能 fail closed。
+      if (!Number.isInteger(current.totalPages) || current.totalPages < 1)
+        throw stop(
+          job,
+          "结果总页数尚未建立 baseline，无法确认本站是否还有后续页。",
+        );
+      if (current.currentPage >= current.totalPages) return finishPageRun(job);
+      // 唯一的 Page N → Page N+1 business transition：advancePage 内部只发一次跳页动作、
+      // 绝不重试、绝不循环，并且自己重新证明源页完整后才允许离开。
+      job = await advancePage(job);
+      job = await runCurrentPageLoop(
+        job,
+        normalizeAutomationJob(job).currentPageRows,
+      );
+    }
   }
 
   /**
-   * 一轮执行的终态：页耗尽 → DONE；否则是正常的连续页前缀完成 → PARTIAL_COMPLETE。
+   * 一轮执行的唯一成功终态：DONE（M8.2b Slice 5 统一）。
+   *
+   * 只有三条同时成立才写 DONE：当前页就是最后一页、当前页自身完整、completedPages
+   * 连续覆盖 1..totalPages（后者的严格连续性由 invariant 强制）。**绝不**用间接信号
+   * 判断末页——行数不足、分页按钮被禁用、下一个结果页为空都不在判据里。
    *
    * 当前页的完成检查点与终态必须在**同一次写入**里落盘：只写一半的中间状态会同时
    * 违反冻结集合与 completedPages 的 invariant（页内态不允许当前页已完成）。
+   *
+   * totalPages = 1 的单页站点同样收尾成 DONE，不再写 M8.2a 的 FIRST_PAGE_COMPLETE：
+   * 那个状态只保留读取兼容，新流程不再产生。PARTIAL_COMPLETE 同理。
    */
   async function finishPageRun(job) {
     const normalized = normalizeAutomationJob(job);
@@ -1435,12 +1485,15 @@ export function createZxgkAutomation(dependencies) {
     const totalPages = normalized.totalPages;
     const complete = pageCompleteness(job, currentPage);
     if (!complete.ok) throw stop(job, complete.reason);
-    // 页数未知时既不能证明"还有后续页"，也不能证明"已到最后一页"，只能 fail closed。
-    // 正常路径不会走到这里：需要跳页时，跳页协议的前置条件已经先拦住这一种情况。
     if (!Number.isInteger(totalPages) || totalPages < 1)
       throw stop(
         job,
         "结果总页数尚未建立 baseline，无法确认本站是否还有后续页。",
+      );
+    if (currentPage !== totalPages)
+      throw stop(
+        job,
+        `第 ${currentPage} 页已处理完，但网站仍自报共 ${totalPages} 页，未按完成收尾（不会跳过任何后续页）。`,
       );
     const completedPages = pageCompleteSummary(
       job,
@@ -1448,21 +1501,15 @@ export function createZxgkAutomation(dependencies) {
       currentPage,
       dependencies.now().toISOString(),
     );
-    return saveState(
-      job,
-      currentPage >= totalPages
-        ? AUTOMATION_STATES.DONE
-        : AUTOMATION_STATES.PARTIAL_COMPLETE,
-      {
-        currentOperation: null,
-        error: null,
-        errorCode: null,
-        firstPageComplete: null,
-        currentPage,
-        totalPages,
-        completedPages,
-      },
-    );
+    return saveState(job, AUTOMATION_STATES.DONE, {
+      currentOperation: null,
+      error: null,
+      errorCode: null,
+      firstPageComplete: null,
+      currentPage,
+      totalPages,
+      completedPages,
+    });
   }
 
   /** 只读一页快照：读取失败按"读不到"处理，由调用方 fail closed。 */
@@ -1492,7 +1539,7 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * fresh resume 的第 1 页证明（M8.2b Slice 4B）。
+   * fresh resume 的第 1 页证明（M8.2b Slice 4B，Slice 5 保持严格不变）。
    *
    * 三条都必须成立，任何一条不成立都 fail closed：
    * 1. 页面坐标严格是第 1 页；
@@ -1500,9 +1547,10 @@ export function createZxgkAutomation(dependencies) {
    *    **绝不**接受新的 baseline）；
    * 3. 第 1 页结果集合必须与 pageOneRowKeys 完全一致（boundary fingerprint）。
    *
-   * pageOneRowKeys 在这里只被当作第 1 页的 boundary 指纹消费：它不参与第 2 页的
-   * 列表留痕、详情进度或冻结集合判定（第 2 页在 normalize 视图里是惰性陈旧数据），
-   * 也绝不因为页面变化而被改写。
+   * pageOneRowKeys 在这里只被当作第 1 页的 boundary 指纹消费：它不参与第 2..N 页的
+   * 列表留痕、详情进度或冻结集合判定，也绝不因为页面变化而被改写。第 2..N 页的历史
+   * rowKeys 有意**不**持久化（D1）：接受"已完成过的中间页无法被重新验证"这一残余风险，
+   * 换取不写入任何历史页行键。
    */
   function proveFirstPage(job, snapshot) {
     const baseline = normalizeAutomationJob(job).totalPages;
@@ -1546,62 +1594,34 @@ export function createZxgkAutomation(dependencies) {
   }
 
   /**
-   * 「继续本次核查」处理完第 1 页之后的终态（M8.2b Slice 4B）。
+   * 把页面定位到 checkpoint 页（fresh resume 专用，M8.2b Slice 5）。
    *
-   * - 网站只有第 1 页：保持 M8.2a 的 FIRST_PAGE_COMPLETE 终态，不引入新的分页语义；
-   * - 网站还有后续页：补做 Slice 3B 的 1 → 2 transition（advancePage 内部只发一次
-   *   跳页动作），然后由 finishPageRun 决定 DONE / PARTIAL_COMPLETE。
+   * 前置：已经用 proveFirstPage 在重建出来的第 1 页上确认了 baseline 与边界指纹。
    *
-   * 绝不泛化到 currentPage + 1 的通用分页：这里唯一的推进动作就是 advancePage。
+   * locate jump 与 business advance 严格不同：
+   * - **不写** PAGE_ADVANCE intent、不改 completedPages、不产生任何 Capture、
+   *   也不改 persisted 的 currentPage：它只回答"页面现在停在第几页"；
+   * - 只在页面确实不在目标页时才发出**恰好一次**跳页动作，绝不重试；
+   * - 到达判定与 same-environment settle 共用 classifyPageArrival，因此"页面明确落在
+   *   别的页"与"结果总页数已经变化"走同一套 fail closed，而不是自己再造一套规则。
+   *
+   * 定位途中崩溃不需要任何补偿记录：下一次 fresh resume 会重新从第 1 页开始定位。
    */
-  async function finishResumedFirstPage(job) {
-    const normalized = normalizeAutomationJob(job);
-    if (
-      Number.isInteger(normalized.totalPages) &&
-      normalized.currentPage >= normalized.totalPages
-    )
-      return firstPageCompleteness(job);
-    job = await advancePage(job);
-    const nextRows = normalizeAutomationJob(job).currentPageRows;
-    return finishPageRun(await runCurrentPageLoop(job, nextRows));
-  }
-
-  /**
-   * fresh resume 的「重新跳到第 2 页」（M8.2b Slice 4B）。
-   *
-   * 前置：已经在重建出来的第 1 页上通过了 proveFirstPage。
-   *
-   * 旧环境里的跳页 dispatch 结果不可信，因此这里**重新发出恰好一次**跳页动作，
-   * 再用真实页面事实确认到达（与 same environment 共用 classifyPageArrival）。
-   * 到达之后，第 2 页的冻结集合必须与 persisted 完全一致：第 2 页的列表留痕与
-   * 已完成详情都据此跳过，绝不重写历史 fingerprint，也绝不重复生成证据。
-   *
-   * 目标页写死为本轮唯一允许的第二页，不做任何通用后续页推导。
-   */
-  async function restoreSecondPage(job, baseline) {
-    const persisted = normalizeAutomationJob(job);
-    if (persisted.currentPage !== RESUMABLE_SECOND_PAGE_NO)
-      throw stop(
-        job,
-        `本轮只支持把第 ${FIRST_PAGE_NO} 页恢复到第 ${RESUMABLE_SECOND_PAGE_NO} 页，已停止自动核查。`,
-      );
+  async function locateToCheckpoint(job, observed, targetPage, baseline) {
+    if (pageFactsMatch(observed, targetPage, baseline)) return observed;
     if (
       typeof dependencies.jumpToPage !== "function" ||
       typeof dependencies.sleep !== "function"
     )
       throw stop(job, "缺少跳页动作依赖，未发出跳页动作。");
-    const lockedKeys = persisted.pageFrozenKeys;
-    if (!Array.isArray(lockedKeys) || !lockedKeys.length)
-      throw stop(job, "第 2 页缺少已冻结的结果集合，无法安全恢复。");
-
-    // STEP 1 — 只发出一次跳页动作。唯一的网站 dispatch 调用点在 dispatchJumpToPage。
-    const dispatched = await dispatchJumpToPage(
-      job.tabId,
-      RESUMABLE_SECOND_PAGE_NO,
-    );
+    // 定位的源页就是"页面当前真正停在哪一页"：它只是判定"是否还在飞行中"的参照，
+    // 不是任何业务进度，因此不进 persisted 状态。
+    const sourcePage = Number.isInteger(observed?.page?.shown)
+      ? observed.page.shown
+      : FIRST_PAGE_NO;
+    const dispatched = await dispatchJumpToPage(job.tabId, targetPage);
     if (!dispatched.ok) throw stop(job, dispatched.error);
 
-    // STEP 2 — 只认页面事实；到期仍没有确定结论就 fail closed，绝不重发。
     const deadline = dependencies.now().getTime() + PAGE_ADVANCE_TIMEOUT_MS;
     const maxPolls = boundedPolls(
       PAGE_ADVANCE_TIMEOUT_MS,
@@ -1612,78 +1632,65 @@ export function createZxgkAutomation(dependencies) {
       if (!snapshot)
         throw await pauseWith(
           job,
-          "PAGE_ADVANCE_READ_FAILED",
-          "跳页后无法确认结果页面状态，已暂停自动核查。",
+          "RESUME_PAGE_UNREADABLE",
+          "定位检查点分页时无法读取结果页面，已暂停自动核查。",
         );
+      if (pageFactsMatch(snapshot, targetPage, baseline)) return snapshot;
       const decision = classifyPageArrival(snapshot, {
-        sourcePage: FIRST_PAGE_NO,
-        targetPage: RESUMABLE_SECOND_PAGE_NO,
+        sourcePage,
+        targetPage,
         baseline,
       });
-      if (decision.outcome === "SETTLED") {
-        const reconciled = reconcileFrozenSet(
-          lockedKeys,
-          snapshot,
-          RESUMABLE_SECOND_PAGE_NO,
-        );
-        if (!reconciled.ok)
-          throw await pauseWith(
-            job,
-            "RESUME_FROZEN_SET_CHANGED",
-            reconciled.error,
-          );
-        job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
-          error: null,
-          errorCode: null,
-          currentPage: RESUMABLE_SECOND_PAGE_NO,
-          totalPages: baseline,
-          resultPage: {
-            pageNo: RESUMABLE_SECOND_PAGE_NO,
-            totalPages: snapshot.page?.totalPages ?? null,
-            totalSize: snapshot.page?.totalSize ?? null,
-          },
-        });
-        return finishPageRun(await runCurrentPageLoop(job, reconciled.rows));
-      }
       if (decision.outcome === "FAILED")
         throw await pauseWith(job, decision.code, decision.error);
       if (poll + 1 >= maxPolls || dependencies.now().getTime() >= deadline)
         throw await pauseWith(
           job,
           "PAGE_ADVANCE_TIMEOUT",
-          `跳页后第 ${RESUMABLE_SECOND_PAGE_NO} 页在限定时间内没有出现，本次自动核查已暂停（不会再次发出跳页动作）。`,
+          `定位第 ${targetPage} 页时页面在限定时间内没有出现，本次自动核查已暂停（不会再次发出跳页动作）。`,
         );
       await dependencies.sleep(PAGE_ADVANCE_POLL_MS);
     }
   }
 
   /**
-   * 恢复已有 checkpoint 的本次核查（M8.2b Slice 4B）。
+   * 恢复已有 checkpoint 的本次核查（M8.2b Slice 4B，Slice 5 泛化到任意页）。
    *
    * 调用方已经保证：环境已重建、人工验证已完成、result === HAS_RESULT，
-   * 且 target 来自 deriveResumeTarget（因此只会是第 1 页或第 2 页）。
+   * 且 target 来自 deriveResumeTarget —— 目标恒为 persisted 的 currentPage。
    *
-   * 两条路径严格分开：
-   * - same environment：页面自己证明它仍然是 persisted 当前页（页坐标 + baseline +
-   *   已冻结集合全部一致）时，才允许在原环境上继续；
-   * - fresh environment：重建环境后页面必然回到第 1 页，因此必须先证明第 1 页，
-   *   再按 persisted 页坐标决定要不要重新跳到第 2 页。
+   * 三条路径严格分开，且全部只以页面事实为准：
+   * - **same environment**（第 1 页除外）：页面自己证明它仍然是 persisted 的当前页
+   *   （页坐标 + baseline + 已冻结集合全部一致）时，才允许在原环境上就继续，不重建、
+   *   不重发跳页。第 1 页不走这条快路径：它一律重新做边界证明，避免绕过 boundary 指纹。
+   * - **pending PAGE_ADVANCE**：注册表里还留着"源页已完成、准备离开"的意图，但页坐标
+   *   仍停在源页。旧环境里的 dispatch 结果不可信，因此只认页面事实：真的到了目标页就
+   *   就地冻结并继续；否则落回 fresh 路径，重新证明源页后重新发出一次 business transition。
+   * - **fresh environment**：重建环境后页面必然回到第 1 页，因此先证明第 1 页
+   *   （baseline 不变 + 边界指纹严格对账），再定位到 checkpoint 页并与它已冻结的集合
+   *   严格对账；对账通过后页内进度原样保留（已完成的列表与详情绝不重复留痕），
+   *   最后交给通用分页循环跑到最后一页。
+   *
+   * 目标页之前的每一页都**不需要**重新证明：它们的历史证据已经在 DB 里，页级
+   * checkpoint 只回答"这一页是否已经完整处理过"。
    *
    * 任何关键事实不能证明都 fail closed：不猜页、不重写 fingerprint、不重复留痕。
    */
   async function resumeCheckpoint(job, target) {
     const persisted = normalizeAutomationJob(job);
     const baseline = persisted.totalPages;
+    const targetPage = target.targetPage;
     const pending = job.currentOperation || null;
 
-    if (target.targetPage === RESUMABLE_SECOND_PAGE_NO) {
-      // same environment 快路径：页面自己证明它仍然是 persisted 的第 2 页。
+    // same environment 快路径：页面自己证明它仍然是 persisted 的当前页。
+    // 第 1 页例外——它必须走下面的边界证明，绝不因为"页面正好在第 1 页"就跳过。
+    if (targetPage !== FIRST_PAGE_NO) {
       const same = await readPageOrNull(job.tabId);
-      if (same && pageFactsMatch(same, RESUMABLE_SECOND_PAGE_NO, baseline)) {
+      if (same && pageFactsMatch(same, targetPage, baseline)) {
         const reconciled = reconcileFrozenSet(
           persisted.pageFrozenKeys,
           same,
-          RESUMABLE_SECOND_PAGE_NO,
+          targetPage,
         );
         if (!reconciled.ok)
           throw await pauseWith(
@@ -1694,19 +1701,21 @@ export function createZxgkAutomation(dependencies) {
         // 这里刻意不清空 currentOperation：先把上一轮已经成功的留痕补记完，
         // 否则会在"补记"之前多出一个新的中断窗口，反而可能重复留痕。
         job = await settlePendingOperation(job, pending);
-        return finishPageRun(await runCurrentPageLoop(job, reconciled.rows));
+        return runPageRun(job, reconciled.rows);
       }
     }
 
-    // Case B（只在 driver 层判定）：上一轮已经落盘“源页已完成、准备离开这一页”的意图，
-    // 但记录里的页坐标仍然停在源页。旧环境里的 dispatch 结果不可信，因此只认页面事实：
-    // - 真的到了目标页：注册表里本来就没有这一页的冻结集合，以真实事实就地冻结并继续；
-    // - 还停在源页：落到下面的第 1 页路径，重新证明后重新发出一次跳页；
-    // - 落在其它页 / 总页数已变化：fail closed。
+    // 上一轮已经落盘"源页已完成、准备离开这一页"的意图，但记录里的页坐标仍停在源页。
+    // 旧环境里的 dispatch 结果不可信，因此这里只接受一种页面事实：**页面真的已经在
+    // 目标页**——那说明意图其实已经生效，就地冻结并继续，绝不重发动作。
+    //
+    // 页面停在源页或其它任何一页都不在这里下结论：它可能只是环境已经被重建（重建后
+    // 页面必然回到第 1 页）。那时一律落回下面的 fresh 路径重新证明源页，再重新发出
+    // 一次 business transition——这同时保证"环境不同就绝不拿旧 dispatch 的结果当事实"。
     const pendingTurn =
       pending?.type === "PAGE_ADVANCE" &&
       Number.isInteger(pending.targetPage) &&
-      pending.targetPage === RESUMABLE_SECOND_PAGE_NO
+      pending.targetPage === pending.pageNo + 1
         ? pending
         : null;
     if (pendingTurn) {
@@ -1717,29 +1726,15 @@ export function createZxgkAutomation(dependencies) {
           targetPage: pendingTurn.targetPage,
           baseline,
         });
-        if (decision.outcome === "FAILED")
-          throw await pauseWith(job, decision.code, decision.error);
         if (decision.outcome === "SETTLED") {
-          job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
-            error: null,
-            errorCode: null,
-            currentPage: RESUMABLE_SECOND_PAGE_NO,
-            totalPages: baseline,
-            resultPage: {
-              pageNo: RESUMABLE_SECOND_PAGE_NO,
-              totalPages: arrived.page?.totalPages ?? null,
-              totalSize: arrived.page?.totalSize ?? null,
-            },
-            pageFrozenKeys: decision.keys,
-            currentPageRows: decision.rows,
-            expectedDetailCount: decision.rows.length,
-            completedDetailKeys: [],
-            detailCaptures: [],
-            listCapture: null,
-            listFilename: null,
-            currentOperation: null,
+          job = await freezeArrivedPage(job, {
+            pageNo: pendingTurn.targetPage,
+            baseline,
+            rows: decision.rows,
+            keys: decision.keys,
+            snapshot: arrived,
           });
-          return finishPageRun(await runCurrentPageLoop(job, decision.rows));
+          return runPageRun(job, decision.rows);
         }
       }
     }
@@ -1755,22 +1750,24 @@ export function createZxgkAutomation(dependencies) {
     const proof = proveFirstPage(job, firstSnapshot);
     if (!proof.ok) throw await pauseWith(job, proof.code, proof.reason);
 
-    if (target.targetPage === RESUMABLE_SECOND_PAGE_NO) {
-      job = await settlePendingOperation(job, pending);
-      return restoreSecondPage(job, baseline);
-    }
-
-    // 目标第 1 页：先补记已有的成功留痕，再处理当前页，最后决定终态。
-    job = await saveState(job, AUTOMATION_STATES.READING_RESULT_ROWS, {
-      resultPage: {
-        pageNo: FIRST_PAGE_NO,
-        totalPages: firstSnapshot.page?.totalPages ?? null,
-        totalSize: firstSnapshot.page?.totalSize ?? null,
-      },
-    });
+    const located = await locateToCheckpoint(
+      job,
+      firstSnapshot,
+      targetPage,
+      baseline,
+    );
+    const reconciled = reconcileFrozenSet(
+      persisted.pageFrozenKeys,
+      located,
+      targetPage,
+    );
+    if (!reconciled.ok)
+      throw await pauseWith(job, "RESUME_FROZEN_SET_CHANGED", reconciled.error);
+    // 只更新"最近一次读取的结果页"：页内进度（已完成详情、列表留痕、详情留痕）
+    // 原样保留，否则恢复会重复留痕这一页已经生成过的证据。
+    job = await markResumePage(job, targetPage, baseline, located);
     job = await settlePendingOperation(job, pending);
-    job = await runCurrentPageLoop(job, proof.rows);
-    return finishResumedFirstPage(job);
+    return runPageRun(job, reconciled.rows);
   }
 
   async function continueAfterVerification({ taskId }) {
@@ -1792,10 +1789,10 @@ export function createZxgkAutomation(dependencies) {
       // deriveResumeTarget 只读页模型（没有 checkpoint 时它也只返回 ok:false）。
       const target = deriveResumeTarget(job);
       const tab = await dependencies.getTab(job.tabId);
-      // 标签页丢失 / 已经离开查询页时绝不猜页：交回「继续本次核查」重建页面。
+      // 标签页丢失 / 已经离开查询页时绝不猜页：交回「继续剩余分页核查」重建页面。
       if (!tab || !isZxgkExecutionPage(tab.url))
         throw new Error(
-          "自动核查标签页已关闭或已离开综合查询页面，请使用「继续本次核查」重新建立页面。",
+          "自动核查标签页已关闭或已离开综合查询页面，请使用「继续剩余分页核查」重新建立页面。",
         );
       // Phase B（Slice 4B 修正 1）：用户已经点击「验证完成，继续」，因此此刻页面上的
       // 失效文案才是"本次人工验证没有被网站接受"的证据。Phase A 里同样的文案可能只是
@@ -1828,7 +1825,7 @@ export function createZxgkAutomation(dependencies) {
       });
       job = await ensureQuery(job);
       if (result === AUTOMATION_RESULT.HAS_RESULT) {
-        // 有 checkpoint = 继续本次核查（复用原 Query 与已完成的留痕）；
+        // 有 checkpoint = 继续剩余分页核查（复用原 Query 与已完成的留痕）；
         // 否则才是全新的核查（第 1 页 → 第 2 页）。
         return target.ok
           ? await resumeCheckpoint(job, target)

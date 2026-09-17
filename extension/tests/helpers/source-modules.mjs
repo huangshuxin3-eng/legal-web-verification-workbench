@@ -16,14 +16,17 @@ const probePrintConfig = resolve(
 );
 
 let root;
+let pending;
 
 /**
  * extension/src 是有意不完整的：config.mjs 与 print-config.mjs 由构建期注入。
  * 这里按与 scripts/build.mjs 完全相同的方式补齐这两个文件，使测试直接运行
  * extension/src 的真实逻辑，而不是依赖可能陈旧的 dist 产物。
+ *
+ * 并发安全：同一进程内多个 `Promise.all(loadSourceModule(...))` 只会真正复制一次，
+ * 其余调用复用同一个 promise，否则并发的 rm+cp 会互相踩到同一个临时目录。
  */
-export async function sourceRoot() {
-  if (root) return root;
+async function buildSourceRoot() {
   const target = join(tmpdir(), `nonlit-extension-src-${process.pid}`);
   await rm(target, { recursive: true, force: true });
   await cp(resolve(extension, "src"), target, { recursive: true });
@@ -44,6 +47,16 @@ export async function sourceRoot() {
   return root;
 }
 
+export async function sourceRoot() {
+  if (root) return root;
+  if (!pending) pending = buildSourceRoot();
+  try {
+    return await pending;
+  } finally {
+    pending = undefined;
+  }
+}
+
 export async function loadSourceModule(relativePath) {
   const target = await sourceRoot();
   return import(pathToFileURL(resolve(target, relativePath)).href);
@@ -58,6 +71,7 @@ export function normalize(text) {
 }
 
 export async function cleanupSourceRoot() {
+  pending = undefined;
   if (!root) return;
   const target = root;
   root = undefined;

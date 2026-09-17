@@ -12,11 +12,17 @@ const CANDIDATE = "某某集团有限公司";
 /** 每页 10 条。页内序号跨页必然重复，因此只能靠 rowKey 建立身份。 */
 const PAGE_SIZE = 10;
 
+/**
+ * 身份 = name + caseNo + detailIdentity（filingDate 只是 metadata，不参与身份）。
+ * 默认身份由「页号 + 序号」派生，因此跨页也不会误撞。
+ */
 const rowOf = (index, pageNo) => ({
   serial: String(index + 1),
   name: CANDIDATE,
   filingDate: `2023年${(index % 9) + 1}月10日`,
   caseNo: `（2023）粤0305执${pageNo}${String(index + 1).padStart(2, "0")}号`,
+  detailIdentity: `ID-${pageNo}-${index + 1}`,
+  identityError: null,
   label: "查看",
 });
 
@@ -146,8 +152,8 @@ test("freezePageRows：按指定页冻结，页不符或身份重复一律 fail 
   assert.equal(duplicated.ok, false);
   assert.match(duplicated.error, /完全相同的结果/);
 
-  // 缺少任一身份字段都不能冻结。
-  for (const field of ["name", "caseNo", "filingDate"]) {
+  // 缺少任一**身份**字段都不能冻结：filingDate 已不在身份契约里。
+  for (const field of ["name", "caseNo", "detailIdentity"]) {
     const incomplete = adapter.freezePageRows(
       { ...snapshotOf(2), rows: [{ ...page2[0], [field]: "" }] },
       2,
@@ -155,6 +161,31 @@ test("freezePageRows：按指定页冻结，页不符或身份重复一律 fail 
     assert.equal(incomplete.ok, false, `缺少 ${field} 必须被拒绝`);
     assert.match(incomplete.error, /无法建立稳定身份/);
   }
+
+  // 立案时间为空是合法的真实事实（真人第 3 页第 10 条），绝不因此拒绝。
+  const emptyFilingDate = adapter.freezePageRows(
+    { ...snapshotOf(2), rows: [{ ...page2[0], filingDate: "" }] },
+    2,
+  );
+  assert.equal(emptyFilingDate.ok, true);
+  assert.equal(emptyFilingDate.keys[0], adapter.buildRowKey(page2[0]));
+  // 空立案时间也不会被"补"成任何猜测值。
+  assert.equal(emptyFilingDate.rows[0].filingDate, "");
+
+  // onclick 与列表显示不一致（姓名或案号）时页面侧会记下 identityError，
+  // 这里必须原样 fail closed，绝不按行号猜该处理哪一条。
+  const identityMismatch = adapter.freezePageRows(
+    {
+      ...snapshotOf(2),
+      rows: [
+        { ...page2[0], identityError: "“查看”链接中的案号与列表显示不一致。" },
+      ],
+    },
+    2,
+  );
+  assert.equal(identityMismatch.ok, false);
+  assert.match(identityMismatch.error, /无法建立稳定身份/);
+  assert.match(identityMismatch.error, /案号与列表显示不一致/);
 });
 
 // ---------------------------------------------------------------------------

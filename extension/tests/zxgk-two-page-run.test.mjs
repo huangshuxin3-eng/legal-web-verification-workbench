@@ -7,6 +7,18 @@ import {
 
 test.after(cleanupSourceRoot);
 
+/**
+ * 两页站点（totalPages = 2）特例的回归保护（M8.2b Slice 5）。
+ *
+ * Slice 5 的通用分页引擎把"第 2 页就是最后一页"当成普通情形正常收尾成 DONE，
+ * 不再产生 PARTIAL_COMPLETE。因此本文件收敛为**两页特例**：
+ * - 需要终态的用例一律用 totalPages = 2（第 2 页 → DONE，只发一次跳页）；
+ * - 需要 21 页 baseline 的用例（重复身份 / baseline 变化 / 中断窗口 / 边界证明失败）
+ *   都在到达第 3 页之前就已经停下，继续沿用 21 页即可；
+ * - 通用多页（1 / 2 / 3 / 21 页的正常执行）与通用恢复由 zxgk-multipage-run.test.mjs、
+ *   zxgk-multipage-resume.test.mjs 覆盖，本文件不再重复。
+ */
+
 const ENTITY = "上海某某科技有限公司";
 
 const executionTask = {
@@ -28,11 +40,14 @@ async function modules() {
   return { state, adapter, workflow };
 }
 
-const rowOf = (serial, caseNo, filingDate) => ({
+/** 身份 = name + caseNo + detailIdentity；filingDate 不参与身份。 */
+const rowOf = (serial, caseNo, filingDate, detailIdentity) => ({
   serial: String(serial),
   name: "某某集团有限公司",
   caseNo,
   filingDate,
+  detailIdentity: detailIdentity ?? `ID-${serial}`,
+  identityError: null,
   label: "查看",
 });
 
@@ -279,6 +294,25 @@ async function harness(options = {}) {
       return job;
     },
     /**
+     * 直接写入持久化 job（绕过 saveJob 的杀进程模拟）：用于构造真实的
+     * legacy / 中断现场快照，而不是靠复制生产逻辑去"生成"它们。
+     */
+    setJob(next) {
+      job = next;
+      savedJobs.push(next);
+      states.push(next.state);
+      return job;
+    },
+    /**
+     * 模拟扩展进程重新可用：写入不再被丢弃，但**不改动持久化 job**。
+     * 与 interrupt() 的分工见多页桩（zxgk-multipage-harness.mjs）。
+     */
+    revive() {
+      killed = false;
+      killNextWrite = false;
+      return job;
+    },
+    /**
      * 模拟扩展重启：进程重新可用，并按 worker 的启动扫描把"运行中但已中断"
      * 的状态标记为 FAILED（已生成的进度原样保留）。
      */
@@ -290,7 +324,7 @@ async function harness(options = {}) {
         ...job,
         state: state.AUTOMATION_STATES.FAILED,
         error:
-          "扩展后台在自动操作期间中断，无法确认上一步是否完成。已生成的 Query 与留痕全部保留，可在 Side Panel 中「继续本次核查」。",
+          "扩展后台在自动操作期间中断，无法确认上一步是否完成。已生成的 Query 与留痕全部保留，可在 Side Panel 中「继续剩余分页核查」。",
         updatedAt: new Date("2026-09-15T08:05:00.000Z").toISOString(),
       };
       return job;
@@ -320,40 +354,55 @@ const continueRun = (run) =>
   run.automation.continueAfterVerification({ taskId: executionTask.id });
 
 // ---------------------------------------------------------------------------
-// 1. 两页执行主链路：第 1 页 → 一次跳页 → 第 2 页 → PARTIAL_COMPLETE
+// 1. 两页站点（totalPages = 2）的主链路：第 1 页 → 恰好一次跳页 → 第 2 页 → DONE
+//
+// Slice 5 起通用分页引擎把"第 2 页就是最后一页"的情形正常收尾成 DONE，不再写
+// PARTIAL_COMPLETE；本文件因此整体收敛为**两页特例**的回归保护：页序、身份、
+// 留痕编号与"只发一次跳页"都被逐条钉住。
 // ---------------------------------------------------------------------------
 
-test("两页执行：第 1 页 → 唯一一次跳页 → 第 2 页 → PARTIAL_COMPLETE，绝不到第 3 页", async () => {
+test("totalPages = 2：第 1 页 → 恰好一次跳页 → 第 2 页 → DONE，绝不进入第 3 页", async () => {
   const { state, adapter } = await modules();
-  const run = await startRun({ totalPages: 21 });
+  const run = await startRun({ totalPages: 2 });
   const job = await continueRun(run);
 
   const pageOneKeys = keysOf(adapter, rowsOfPage(1));
   const pageTwoKeys = keysOf(adapter, rowsOfPage(2));
 
-  // 终态：连续页前缀 1..2 已完整处理，但网站还有后续页 —— 这是正常停止，不是错误。
-  assert.equal(job.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  // 终态：连续页前缀 1..2 覆盖全部页，且当前页就是最后一页 —— 正常成功收尾。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
+  assert.notEqual(job.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
   assert.equal(job.currentPage, 2);
-  assert.equal(job.totalPages, 21);
+  assert.equal(job.totalPages, 2);
   assert.deepEqual(
     job.completedPages.map((item) => item.pageNo),
     [1, 2],
   );
+  assert.deepEqual(
+    job.completedPages.map((item) => item.detailCount),
+    [3, 3],
+  );
   assert.equal(job.currentOperation, null);
   assert.equal(job.firstPageComplete, null);
   assert.equal(state.isAutomationRunning(job), false);
-  assert.equal(state.canStartNewAutomation(job), false);
+  assert.equal(state.canStartNewAutomation(job), true);
   assert.equal(state.canRecheckAutomation(job), false);
 
   // 一次 transition 只发出一次跳页动作，目标就是第 2 页。
   assert.deepEqual(jumps(run), [["jump", 21, 2]]);
   assert.equal(run.list.pageNo, 2);
-  // 页面从未被读取过第 3 页：控制流里没有第二个跳页点，结构上到不了下一页。
+  // 页面从未被读取过第 3 页：totalPages 已到顶，通用循环直接收尾而不是继续翻页。
   assert.deepEqual(
     [...new Set(named(run, "read-list").map((call) => call[2]))].sort(),
     [1, 2],
   );
   assert.equal(run.states.includes("ADVANCING_PAGE"), true);
+  assert.equal(
+    run.savedJobs.filter(
+      (item) => item.state === state.AUTOMATION_STATES.ADVANCING_PAGE,
+    ).length,
+    1,
+  );
 
   // 两页共用同一个 canonical Query，全部 Capture 都属于它。
   assert.equal(named(run, "create-query").length, 1);
@@ -405,7 +454,7 @@ test("两页执行：第 1 页 → 唯一一次跳页 → 第 2 页 → PARTIAL_
 
 test("第 2 页：先留痕列表再逐条详情，列表只归档一次、详情不留痕在列表之前", async () => {
   const { adapter } = await modules();
-  const run = await startRun({ totalPages: 21 });
+  const run = await startRun({ totalPages: 2 });
   const job = await continueRun(run);
 
   const jumpIndex = run.calls.findIndex((call) => call[0] === "jump");
@@ -473,7 +522,7 @@ test("第 2 页存在两条完全相同的结果：不进入第 2 页详情，�
   duplicated[1] = { ...duplicated[0], serial: "9" };
   const run = await startRun({ totalPages: 21, pageTwoRows: duplicated });
 
-  await assert.rejects(continueRun(run), /存在两条完全相同的结果/);
+  await assert.rejects(continueRun(run), /存在两条身份完全相同的结果/);
   const job = run.job;
   assert.equal(job.state, state.AUTOMATION_STATES.FAILED);
   assert.equal(job.errorCode, "ADVANCE_ROWS_INVALID");
@@ -597,7 +646,7 @@ test("第 2 页详情 Capture 已成功但进度尚未落盘时中断：证据�
 
 test("上一轮停在第 2 页后重新开始：页运行态被清空，且绝不把第 2 页当成第 1 页", async () => {
   const { state } = await modules();
-  const run = await startRun({ totalPages: 21 });
+  const run = await startRun({ totalPages: 2 });
   await continueRun(run);
   assert.equal(run.list.pageNo, 2);
 
@@ -629,32 +678,94 @@ test("上一轮停在第 2 页后重新开始：页运行态被清空，且绝�
   const archivesBefore = named(run, "archive").length;
   const jumpsBefore = jumps(run).length;
   const finished = await continueRun(run);
-  assert.equal(finished.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   // 新一轮重新跑完两页：8 条新留痕 + 1 次新跳页（而不是复用上一轮第 2 页的 checkpoint）。
   assert.equal(named(run, "archive").length, archivesBefore + 8);
   assert.equal(jumps(run).length, jumpsBefore + 1);
 });
 
 // ---------------------------------------------------------------------------
-// 8. PARTIAL_COMPLETE 不是"假的运行中"：没有继续/重新自动核查入口
+// 8. legacy PARTIAL_COMPLETE 的读兼容：不是"假的运行中"，但也不再是"只能 fail closed"
+//
+// Slice 5 起新的核查一律推进到最后一页并写成 DONE，因此 PARTIAL_COMPLETE 只来自旧版本；
+// 它的语义是"连续完整前缀 1..K 已处理完、仍有剩余页"——正确动作是「继续剩余分页核查」，
+// 而不是「重新检查结果」（后者会绕过页级 checkpoint）。
 // ---------------------------------------------------------------------------
 
-test("PARTIAL_COMPLETE 触达继续入口只会 fail closed，不产生任何新留痕与跳页", async () => {
-  const { state } = await modules();
-  const run = await startRun({ totalPages: 21 });
-  const partial = await continueRun(run);
-  assert.equal(partial.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
-  assert.equal(state.isAutomationRunning(partial), false);
-  assert.equal(state.canStartNewAutomation(partial), false);
-  assert.equal(state.canRecheckAutomation(partial), false);
+/** 旧版本留下的 PARTIAL_COMPLETE 检查点：连续完整前缀 1..2，网站自报 21 页。 */
+function legacyPartialJob(run) {
+  const pageOneRows = rowsOfPage(1);
+  const pageTwoRows = rowsOfPage(2);
+  const pageOneKeys = keysOf(run.adapter, pageOneRows);
+  const pageTwoKeys = keysOf(run.adapter, pageTwoRows);
+  const completedAt = "2026-09-15T07:00:00.000Z";
+  return {
+    adapter: run.adapter.ZXGK_EXECUTION_ADAPTER,
+    state: run.state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    taskId: executionTask.id,
+    projectId: executionTask.project_id,
+    entityName: ENTITY,
+    queryText: ENTITY,
+    queryId: "query-7",
+    query: { id: "query-7", query_no: 7, query_text: ENTITY },
+    topic: executionTask.topic,
+    sourceName: executionTask.source_name,
+    sourceUrl: executionTask.source_url,
+    tabId: 21,
+    result: run.state.AUTOMATION_RESULT.HAS_RESULT,
+    currentPage: 2,
+    totalPages: 21,
+    pageFrozenKeys: pageTwoKeys,
+    currentPageRows: pageTwoRows,
+    pageOneRowKeys: pageOneKeys,
+    pageOneRows,
+    expectedDetailCount: 3,
+    completedDetailKeys: pageTwoKeys,
+    detailCaptures: pageTwoKeys.map((rowKey, index) => ({
+      rowKey,
+      captureId: `capture-${index + 8}`,
+      captureNo: index + 8,
+    })),
+    listCapture: { id: "capture-7", query_id: "query-7", capture_no: 7 },
+    listFilename: `${ENTITY}_执行_中国执行信息公开网_Q07_007_20260915.pdf`,
+    currentOperation: null,
+    firstPageComplete: null,
+    completedPages: [1, 2].map((pageNo) => ({
+      pageNo,
+      detailCount: 3,
+      listCaptureId: pageNo === 1 ? "capture-3" : "capture-7",
+      completedAt,
+    })),
+    resultPage: { pageNo: 2, totalPages: 21, totalSize: 63 },
+    updatedAt: completedAt,
+  };
+}
+
+test("legacy PARTIAL_COMPLETE：不是运行中、不能重新开始，但可以「继续剩余分页核查」", async () => {
+  const { state, workflow } = await modules();
+  const run = await harness({ totalPages: 2 });
+  const legacy = legacyPartialJob(run);
+  run.setJob(legacy);
+
+  assert.deepEqual(workflow.validateZxgkAutomationJobInvariant(legacy), {
+    ok: true,
+  });
+  assert.equal(state.isAutomationRunning(legacy), false);
+  assert.equal(state.canStartNewAutomation(legacy), false);
+  // 「重新检查结果」不是它的正确动作：它已经有页级 checkpoint，必须走恢复流程。
+  assert.equal(state.canRecheckAutomation(legacy), false);
+  assert.equal(state.canResumeAutomation(legacy), true);
+  assert.equal(state.deriveResumeTarget(legacy).targetPage, 2);
 
   const archives = named(run, "archive").length;
   const details = named(run, "open-detail").length;
+  const jumpsBefore = jumps(run).length;
+  // 直接触达「重新检查结果」入口：只 fail closed，不产生任何留痕与跳页。
   await assert.rejects(continueRun(run), /不能继续检查结果/);
   assert.equal(run.job.state, state.AUTOMATION_STATES.FAILED);
   assert.equal(named(run, "archive").length, archives);
   assert.equal(named(run, "open-detail").length, details);
-  assert.equal(jumps(run).length, 1);
+  assert.equal(jumps(run).length, jumpsBefore);
 });
 
 // ---------------------------------------------------------------------------
@@ -669,7 +780,7 @@ const pageTwoListCrash = {
 
 test("fresh resume：重建环境后回到第 2 页，只补记已有留痕、绝不重复", async () => {
   const { state } = await modules();
-  const run = await startRun({ totalPages: 21, ...pageTwoListCrash });
+  const run = await startRun({ totalPages: 2, ...pageTwoListCrash });
   await assert.rejects(continueRun(run), /worker killed/);
   run.interrupt();
 
@@ -695,9 +806,10 @@ test("fresh resume：重建环境后回到第 2 页，只补记已有留痕、�
   assert.equal(finished.listCapture.capture_no, 7);
   // 第 1 页也没有重跑：只有第 2 页那 3 条详情是新增留痕。
   assert.equal(detailArchives(run).length, 6);
-  assert.equal(finished.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   assert.equal(finished.currentPage, 2);
-  // 全程两次跳页动作都指向第 2 页，结构上不可能进入第 3 页。
+  // 全程两次跳页动作都指向第 2 页（原 business advance + 恢复时的定位跳页），
+  // 且 totalPages = 2 已到顶：结构上不可能进入第 3 页。
   assert.deepEqual(jumps(run), [
     ["jump", 21, 2],
     ["jump", 21, 2],
@@ -745,7 +857,7 @@ test("fresh resume：网站自报总页数已经变化 → PAUSED(TOTAL_PAGES_CH
 
 test("same environment：页面自己证明仍是 persisted 第 2 页 → 就地继续，不重发跳页", async () => {
   const { state } = await modules();
-  const run = await startRun({ totalPages: 21, ...pageTwoListCrash });
+  const run = await startRun({ totalPages: 2, ...pageTwoListCrash });
   await assert.rejects(continueRun(run), /worker killed/);
   run.interrupt();
   // 经「继续本次核查」回到人工交接点：环境已重建，Query 与 checkpoint 不变。
@@ -774,13 +886,13 @@ test("same environment：页面自己证明仍是 persisted 第 2 页 → 就地
   assert.equal(jumps(run).length, jumpsBefore);
   assert.equal(listArchives(run).length, 2);
   assert.equal(detailArchives(run).length, 6);
-  assert.equal(finished.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   assert.equal(finished.listCapture.capture_no, 7);
 });
 
 test("same environment：页面与 checkpoint 不一致时不猜页，交回重建流程", async () => {
   const { state } = await modules();
-  const run = await startRun({ totalPages: 21, ...pageTwoListCrash });
+  const run = await startRun({ totalPages: 2, ...pageTwoListCrash });
   await assert.rejects(continueRun(run), /worker killed/);
   run.interrupt();
   await run.automation.resume({ taskId: executionTask.id });
@@ -791,7 +903,7 @@ test("same environment：页面与 checkpoint 不一致时不猜页，交回重�
   const finished = await continueRun(run);
   // 重新证明第 1 页 → 重新跳一次 → 第 2 页。
   assert.equal(jumps(run).length, jumpsBefore + 1);
-  assert.equal(finished.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   assert.equal(finished.currentPage, 2);
   assert.equal(listArchives(run).length, 2);
   assert.equal(detailArchives(run).length, 6);
@@ -802,7 +914,7 @@ test("Case B：跳页意图已落盘但页面已到第 2 页 → 以真实事实
   // 只跳过"意图那次写入"，让中断落在意图已落盘、到达尚未落盘的窗口。
   let intentSeen = false;
   const run = await startRun({
-    totalPages: 21,
+    totalPages: 2,
     killBefore: ({ next }) => {
       if (next.currentOperation?.type === "PAGE_ADVANCE") {
         intentSeen = true;
@@ -831,7 +943,7 @@ test("Case B：跳页意图已落盘但页面已到第 2 页 → 以真实事实
 
   // 不重发跳页：直接以页面事实冻结第 2 页并继续。
   assert.equal(jumps(run).length, jumpsBefore);
-  assert.equal(finished.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   assert.equal(finished.currentPage, 2);
   assert.equal(listArchives(run).length, 2);
   assert.equal(detailArchives(run).length, 6);
@@ -841,7 +953,7 @@ test("Case B：意图已落盘但页面仍停在源页 → 重新证明后重新
   const { state } = await modules();
   let intentSeen = false;
   const run = await startRun({
-    totalPages: 21,
+    totalPages: 2,
     killBefore: ({ next }) => {
       if (next.currentOperation?.type === "PAGE_ADVANCE") {
         intentSeen = true;
@@ -862,7 +974,7 @@ test("Case B：意图已落盘但页面仍停在源页 → 重新证明后重新
 
   // 先重新证明第 1 页，然后才重新发出恰好一次跳页动作。
   assert.equal(run.list.pageNo, 2);
-  assert.equal(finished.state, state.AUTOMATION_STATES.PARTIAL_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   assert.deepEqual(
     jumps(run).map((call) => call[2]),
     [2, 2],

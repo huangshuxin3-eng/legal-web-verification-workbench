@@ -22,11 +22,14 @@ async function modules() {
   };
 }
 
-const rowOf = (serial, caseNo, filingDate) => ({
+/** 身份 = name + caseNo + detailIdentity；filingDate 不参与身份。 */
+const rowOf = (serial, caseNo, filingDate, detailIdentity) => ({
   serial: String(serial),
   name: "某某集团有限公司",
   filingDate,
   caseNo,
+  detailIdentity: detailIdentity ?? `ID-${serial}`,
+  identityError: null,
   label: "查看",
 });
 
@@ -653,10 +656,14 @@ test("兼容：DETAIL 与 LIST 的合法 Capture recovery window 保持合法", 
 });
 
 // ---------------------------------------------------------------------------
-// H. Slice 3B 边界：只允许一次 Page 1 → Page 2 transition，结构上不可能到第 3 页
+// H. Slice 5 边界：唯一的 generic 分页循环，业务 advance 数 = totalPages - 1
 // ---------------------------------------------------------------------------
 
-test("Slice 3B：两页 driver 只有一次 advancePage 调用点，且没有任何分页循环", async () => {
+/** 去掉注释后再做"禁止构造"的文本扫描：注释里写明"刻意没有 X"不应该被判成 X。 */
+const stripComments = (source) =>
+  source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+
+test("Slice 5：通用分页循环恰好一个 advancePage 调用点，且只有一个显式 loop", async () => {
   const { state } = await modules();
   const [workflow, stateSource] = await Promise.all([
     readFile(
@@ -680,34 +687,45 @@ test("Slice 3B：两页 driver 只有一次 advancePage 调用点，且没有任
 
   // 一次 transition 最多发出一次跳页动作：dispatch 调用点有且只有一个。
   assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
-  // advancePage：1 次定义 + 2 次调用，两个调用点分属互斥的路径
-  // （全新核查的 runPageRun 与「继续本次核查」的 finishResumedFirstPage），
-  // 因此一次执行仍然最多推进一页；driver 切片内部只有唯一一次调用（见下）。
-  assert.equal((workflow.match(/advancePage\(/g) || []).length, 3);
+  // advancePage：1 次定义 + 1 次 generic loop 调用。business advance 只有一个调用点，
+  // 因此一次执行不可能在某处连翻两页；locate jump 走同一个 dispatch primitive，
+  // 但它不写 intent、不改页坐标（见 locateToCheckpoint）。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 2);
 
-  // 两页 driver 内部：恰好一次 advancePage，且没有 for / while 分页循环，
-  // 也没有任何"本轮允许跑几页"的运行期上限。
+  // generic driver：恰好一次 advancePage、恰好一个显式分页 loop、且没有运行期页数上限。
   const driverBody = workflow.slice(
     workflow.indexOf("async function runPageRun"),
     workflow.indexOf("async function finishPageRun"),
   );
   assert.ok(driverBody.length > 0);
-  assert.equal((driverBody.match(/advancePage\(/g) || []).length, 1);
-  assert.doesNotMatch(driverBody, /\bfor\s*\(|\bwhile\s*\(/);
-  assert.doesNotMatch(driverBody, /PAGES_PER_RUN|maxPages|pageLimit/i);
+  const driverCode = stripComments(driverBody);
+  assert.equal((driverCode.match(/advancePage\(/g) || []).length, 1);
+  assert.equal((driverCode.match(/\bfor\s*\(|\bwhile\s*\(/g) || []).length, 1);
+  assert.doesNotMatch(
+    driverCode,
+    /PAGES_PER_RUN|maxPages|pageLimit|maxPagesThisRun/i,
+  );
+  // 末页判据只能来自页坐标 baseline / totalPages：不得用行数、按钮状态或"下一页为空"。
+  assert.doesNotMatch(driverCode, /rows\.length|disabled|nextPage|lastPage/);
+  assert.match(driverCode, /currentPage >= current\.totalPages/);
 
-  // 终态函数自己不翻页：第 2 页循环之后直接落到 DONE / PARTIAL_COMPLETE 然后 return。
+  // 终态函数自己不翻页：最后一页循环之后直接落 DONE 然后 return。
   const finishBody = workflow.slice(
     workflow.indexOf("async function finishPageRun"),
     workflow.indexOf("async function readPageOrNull"),
   );
   assert.ok(finishBody.length > 0);
-  assert.doesNotMatch(finishBody, /advancePage|jumpToPage|ADVANCING_PAGE/);
-  assert.match(finishBody, /AUTOMATION_STATES\.PARTIAL_COMPLETE/);
-  assert.match(finishBody, /AUTOMATION_STATES\.DONE/);
+  const finishCode = stripComments(finishBody);
+  assert.doesNotMatch(finishCode, /advancePage|jumpToPage|ADVANCING_PAGE/);
+  // Slice 5 起成功终态统一是 DONE：PARTIAL_COMPLETE 不再由新流程产生。
+  assert.doesNotMatch(finishCode, /PARTIAL_COMPLETE/);
+  assert.match(finishCode, /AUTOMATION_STATES\.DONE/);
+  // DONE 必须同时要求 currentPage === totalPages 与 completedPages 连续覆盖全部页。
+  assert.match(finishCode, /currentPage !== totalPages/);
+  assert.match(finishCode, /pageCompleteness\(job, currentPage\)/);
 
-  // PARTIAL_COMPLETE 是已结算态：不是运行中，不会被重启扫描改写成 FAILED，
-  // 也不允许再次自动核查。
+  // PARTIAL_COMPLETE 仍然是已结算态：不是运行中，不会被重启扫描改写成 FAILED；
+  // 也不允许再次自动核查（重新启动会从第 1 页重造一整套 Capture）。
   assert.equal(
     state.AUTOMATION_RUNNING_STATES.includes(
       state.AUTOMATION_STATES.PARTIAL_COMPLETE,
@@ -727,7 +745,7 @@ test("Slice 3B：两页 driver 只有一次 advancePage 调用点，且没有任
     }),
     false,
   );
-  // 它也不是一个"假的运行中"：不提供继续核查入口。
+  // 它也不再是一个"假的终止"：legacy 的这个状态有正确的继续动作。
   assert.equal(
     state.canRecheckAutomation({
       state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,

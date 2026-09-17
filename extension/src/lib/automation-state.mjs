@@ -23,17 +23,18 @@ export const AUTOMATION_STATES = Object.freeze({
 });
 
 /**
- * "部分完成"终止态：PARTIAL_COMPLETE（M8.2b Slice 3B）。
+ * 稳定 checkpoint 态：PARTIAL_COMPLETE（M8.2b Slice 3B 引入，Slice 5 重新定义）。
  *
- * 语义：这一轮自动执行已经把连续页前缀 1..currentPage 完整处理过，但网站仍然存在
- * 未处理的后续页。它是**正常结束**：不是错误、不是运行中，也是一个已结算态——
- * 后台重启时不会像中断状态那样被改写成 FAILED。
+ * 语义（Slice 5 起）：已经有连续完整前缀 1..K，但网站仍有剩余页的**稳定 checkpoint**。
+ * 它是**正常结束**：不是错误、不是运行中，也是一个已结算态——后台重启时不会像中断
+ * 状态那样被改写成 FAILED；同时它是可以「继续剩余分页核查」的检查点。
  *
- * 它对第 2 / 21 页与第 5 / 21 页同样成立，因此名字里只描述"处理到什么程度"，
- * 绝不写开发阶段或具体页数。
+ * Slice 5 的通用分页引擎会把一次核查一直推进到最后一页并写成 DONE，因此**新的核查
+ * 不再产生 PARTIAL_COMPLETE**；这个状态只作为旧版本遗留的检查点保留读取兼容。
+ * 名字里只描述"处理到什么程度"，绝不写开发阶段或具体页数。
  *
- * FIRST_PAGE_COMPLETE 继续作为 M8.2a 的 legacy 终止态保留（只由「继续本次核查」
- * 的第 1 页路径产生），全新核查不再使用它。
+ * FIRST_PAGE_COMPLETE 继续作为 M8.2a 的 legacy 终止态保留读取兼容；Slice 5 起新的
+ * 成功路径统一写成 DONE（包括 totalPages = 1 的情况），新产品路径不再产生它。
  */
 
 /**
@@ -102,10 +103,9 @@ export function canRecheckAutomation(job) {
 }
 
 /**
- * PARTIAL_COMPLETE 有意不在其中：当前没有「从部分完成继续自动核查」的产品语义，
- * 再次启动实际上会从第 1 页重新产生一整套 Capture，很容易被误解成「继续剩余分页」。
- * 因此部分完成时既不提供自动继续，也不提供重新自动核查，用户只能看到状态，
- * 必要时返回手工模式。
+ * PARTIAL_COMPLETE 有意不在其中：它的正确动作是「继续剩余分页核查」（复用原 Query、
+ * 跳过已完成的列表与详情），而重新启动实际上会从第 1 页重新产生一整套 Capture，
+ * 很容易被误解成「继续剩余分页」。因此部分完成时只提供继续入口，不提供重新自动核查。
  */
 export function canStartNewAutomation(job) {
   return (
@@ -140,24 +140,31 @@ export const AUTOMATION_CHECKPOINT_INVALID_CODES = Object.freeze([
  * 只读 normalizeAutomationJob 的兼容视图，不 mutate、不读写 storage、不发网络请求，
  * 也刻意不看 automation state（调用方在任何 saveState 之前调用它）。
  *
- * 本轮的恢复范围严格限定在 Slice 3B 的两页边界内：
- * - 第 1 页（含“已处理完、但还没离开这一页”）→ 目标第 1 页：恢复后必须先在页面上重新
- *   证明第 1 页仍然是同一份结果集，再交给 driver 决定是否继续往后处理；
- * - 第 2 页已冻结且尚未完整处理 → 目标第 2 页。
+ * Slice 5 起不再有"只支持第 1 / 第 2 页"的两页边界。目标页恒为 persisted 的
+ * **currentPage**：它正是已经冻结过结果集合的那一页，"回到第几页"这件事本身不需要
+ * 任何推导。这里绝不推导 currentPage + 1：跳过对源页的重新证明会让通用引擎在未确认
+ * 源页完整的情况下往后翻页，而"源页完整"必须由通用引擎在页面上重新证明。
  *
- * 绝不推导 currentPage + 1，也绝不返回第 3 页：任何超出两页范围的 checkpoint 都
- * 判为不可恢复，交人工。
+ * 可恢复的 checkpoint 必须同时具备：
+ * - 合法的页坐标：currentPage >= 1，且不越界；totalPages 允许缺失（M8.2a 的 legacy
+ *   job 没有页数），但一旦存在就必须是合法值；
+ * - 当前页已经冻结过结果集合：没有它就无从对照结果集身份；
+ * - completedPages 要么停在 currentPage - 1（当前页正在处理中），要么已经覆盖到
+ *   currentPage（当前页已完整处理、只差一次 business advance）。严格连续由 invariant
+ *   保证，这里仍然只读地复核一遍：状态层的失败必须是 fail closed，而不是猜。
+ *
+ * 任何一条不成立都返回 ok:false，交人工；不修复数据、不猜页。
  */
 export function deriveResumeTarget(job) {
   const normalized = normalizeAutomationJob(job);
   if (!normalized || typeof normalized !== "object")
     return { ok: false, reason: "没有可继续的自动核查进度。" };
   const { currentPage, totalPages } = normalized;
-  const pages = Array.isArray(normalized.completedPages)
-    ? normalized.completedPages
-    : [];
   const keys = Array.isArray(normalized.pageFrozenKeys)
     ? normalized.pageFrozenKeys
+    : [];
+  const pages = Array.isArray(normalized.completedPages)
+    ? normalized.completedPages
     : [];
 
   if (totalPages != null && (!Number.isInteger(totalPages) || totalPages < 1))
@@ -172,72 +179,51 @@ export function deriveResumeTarget(job) {
     };
   if (totalPages != null && currentPage > totalPages)
     return { ok: false, reason: "当前页坐标已经越界，无法确认恢复目标。" };
-
-  if (currentPage === FIRST_PAGE_NO) {
-    // 第 1 页：必须有冻结结果集合（boundary 指纹的来源），且 completedPages 不能
-    // 出现超出第 1 页的记录。**第 1 页是否已经处理完不影响目标页**：完成页的推进
-    // 属于 driver 的两页边界，state 层只负责把核查带回第 1 页。
-    if (!keys.length)
-      return {
-        ok: false,
-        reason: "第 1 页还没有冻结的结果集合，无法安全恢复。",
-      };
-    if (pages.length > FIRST_PAGE_NO)
-      return { ok: false, reason: "第 1 页的完成记录与页坐标不一致。" };
+  if (!keys.length)
     return {
-      ok: true,
-      targetPage: FIRST_PAGE_NO,
+      ok: false,
+      reason: `第 ${currentPage} 页还没有冻结的结果集合，无法安全恢复。`,
     };
-  }
-
-  if (currentPage === FIRST_PAGE_NO + 1) {
-    // 第 2 页：只有"第 1 页已完成、第 2 页已冻结、baseline 明确"的 checkpoint
-    // 才可恢复——恢复第 2 页必须重新跳页并用 baseline 判定到达。
-    if (!Number.isInteger(totalPages))
-      return {
-        ok: false,
-        reason: "恢复第 2 页需要明确的结果总页数 baseline，无法安全恢复。",
-      };
-    if (!keys.length)
-      return {
-        ok: false,
-        reason: "第 2 页还没有冻结的结果集合，无法安全恢复。",
-      };
-    if (pages.length !== FIRST_PAGE_NO)
-      return {
-        ok: false,
-        reason: "第 2 页的完成进度与页坐标不一致，无法安全恢复。",
-      };
+  if (pages.some((item, index) => item?.pageNo !== index + 1))
     return {
-      ok: true,
-      targetPage: FIRST_PAGE_NO + 1,
+      ok: false,
+      reason: "已完成页记录不是从第 1 页起的连续前缀，无法安全恢复。",
     };
-  }
+  if (pages.length !== currentPage - 1 && pages.length !== currentPage)
+    return {
+      ok: false,
+      reason: `第 ${currentPage} 页的完成记录与页坐标不一致，无法安全恢复。`,
+    };
 
-  return {
-    ok: false,
-    reason: "本轮只支持恢复到第 1 页或第 2 页，无法安全恢复。",
-  };
+  return { ok: true, targetPage: currentPage };
 }
 
 /**
- * 未完成的核查是否还有可继续的进度（M8.2b Slice 4B 泛化）。
+ * 未完成的核查是否还有可继续的进度。
  *
  * 与 canStartNewAutomation 的区别是语义：这里有 checkpoint，正确动作是
- * 「继续本次核查」（复用原 Query、跳过已完成的列表与详情；第 2 页的 checkpoint
- * 则先重建查询环境并重新完成人工验证，再回到第 2 页），而不是从第 1 条重新开始。
+ * 「继续剩余分页核查」（复用原 Query、跳过已完成的列表与详情；非第 1 页的 checkpoint
+ * 则先重建查询环境并重新完成人工验证，再定位回该页），而不是从第 1 条重新开始。
  *
- * 以下都不提供「继续本次核查」：
- * - 不在 PAUSED / FAILED（运行中、已结算态都没有可继续的动作）；
+ * 以下都不提供「继续剩余分页核查」：
+ * - 不在 PAUSED / FAILED / PARTIAL_COMPLETE（运行中与 DONE 都没有可继续的动作）；
  * - 没有结果（NO_RESULT / UNKNOWN 没有页级 checkpoint）；
  * - 缺少 queryId；
- * - 页模型不足以推导恢复目标（含第 3 页及以后：本轮没有安全的恢复路径）；
+ * - 页模型不足以推导恢复目标；
  * - checkpoint identity 已经失效（结果集 / 页数已经变化）：此时 resume 必然重复
  *   同一个失败，必须交人工。
+ *
+ * PARTIAL_COMPLETE 只在 legacy checkpoint 的范围内被接受：Slice 5 起新的核查一律推进
+ * 到最后并写成 DONE，因此它只可能来自旧版本，而它的语义正是"连续完整前缀 1..K 已处理完、
+ * 仍有剩余页"——「继续剩余分页核查」对它是正确的动作。它仍然不属于 canStartNewAutomation。
  */
 export function canResumeAutomation(job) {
   if (
-    ![AUTOMATION_STATES.PAUSED, AUTOMATION_STATES.FAILED].includes(job?.state)
+    ![
+      AUTOMATION_STATES.PAUSED,
+      AUTOMATION_STATES.FAILED,
+      AUTOMATION_STATES.PARTIAL_COMPLETE,
+    ].includes(job?.state)
   )
     return false;
   if (AUTOMATION_CHECKPOINT_INVALID_CODES.includes(job?.errorCode))

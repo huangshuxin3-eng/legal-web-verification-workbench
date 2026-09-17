@@ -17,11 +17,14 @@ async function modules() {
   return { state, adapter, workflow };
 }
 
-const rowOf = (serial, caseNo, filingDate) => ({
+/** 身份 = name + caseNo + detailIdentity；filingDate 不参与身份。 */
+const rowOf = (serial, caseNo, filingDate, detailIdentity) => ({
   serial: String(serial),
   name: "某某集团有限公司",
   filingDate,
   caseNo,
+  detailIdentity: detailIdentity ?? `ID-${serial}`,
+  identityError: null,
   label: "查看",
 });
 
@@ -798,13 +801,12 @@ test("I. 每个 transition 只发一次跳页动作，且没有任何生产路�
   assert.doesNotMatch(stateSource, /jumpToPage|PAGE_ADVANCE/);
 
   // orchestration 只消费注入的 primitive：dispatch 调用点有且只有一个。
+  // business advance 与 locate jump（fresh resume 的定位）共用这一个 primitive，
+  // 因此"发出网站动作的调用点"在结构上仍然唯一。
   assert.equal((workflow.match(/dependencies\.jumpToPage\(/g) || []).length, 1);
-  // advancePage：1 次定义 + 1 次调用（M8.2b Slice 3B 的两页 driver 里唯一的一次）。
-  // 调用点只有一处，因此一次执行不可能翻两次页，结构上也不可能进入第 3 页。
-  // advancePage：1 次定义 + 2 次调用。两个调用点分属互斥路径
-  // （全新核查的 runPageRun 与「继续本次核查」的 finishResumedFirstPage），
-  // 一次执行仍然最多推进一页；state 层不持有任何分页语义。
-  assert.equal((workflow.match(/advancePage\(/g) || []).length, 3);
+  // advancePage：1 次定义 + 1 次调用（Slice 5 的 generic 分页循环里唯一的一次）。
+  // 调用点只有一处，因此一次迭代不可能翻两次页；页数不受任何常量限制。
+  assert.equal((workflow.match(/advancePage\(/g) || []).length, 2);
   const continueBody = workflow.slice(
     workflow.indexOf("async function continueAfterVerification"),
     workflow.indexOf(

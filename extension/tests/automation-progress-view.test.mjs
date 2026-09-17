@@ -13,9 +13,10 @@ async function modules() {
   return { state, derive: view.deriveZxgkAutomationProgressViewModel };
 }
 
+// rowKey 形态：name | caseNo | detailIdentity（filingDate 不参与身份）。
 const keys = Array.from(
   { length: 10 },
-  (_, index) => `某某公司|（2026）沪01执${index + 1}号|2026年9月15日`,
+  (_, index) => `某某公司|（2026）沪01执${index + 1}号|ID-${index + 1}`,
 );
 
 function firstPageJob(state, patch = {}) {
@@ -251,11 +252,39 @@ test("PARTIAL_COMPLETE 与多页 DONE 都派生页码、已处理页数与留痕
   assert.equal(partial.totalPages, 21);
   assert.equal(partial.completedPageCount, 2);
   assert.equal(partial.completedPageCaptureCount, 13);
-  // 部分完成不提供自动继续，也不提供重新自动核查。
+  // 部分完成：不提供"再次自动核查"（那会从第 1 页重造一整套 Capture）；
+  // 但这个 job 完全没有 result / queryId，因此也没有可继续的检查点。
   assert.equal(partial.canContinue, false);
   assert.equal(partial.canResume, false);
+  assert.equal(
+    state.canStartNewAutomation({
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    }),
+    false,
+  );
   // 也不是"运行中"：不会锁住留痕按钮以外的任何"正在处理"文案。
   assert.equal(partial.currentPageProcessing, false);
+
+  // legacy 的 PARTIAL_COMPLETE 只要带完整 checkpoint（result + queryId + 连续前缀
+  // 1..currentPage + 当前页冻结集合），就是正确的「继续剩余分页核查」入口。
+  const resumablePartial = derive({
+    ...base,
+    state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    result: state.AUTOMATION_RESULT.HAS_RESULT,
+    queryId: "query-7",
+  });
+  assert.equal(resumablePartial.partialComplete, true);
+  assert.equal(resumablePartial.canResume, true);
+  assert.equal(resumablePartial.resumeTargetPage, 2);
+  assert.equal(
+    state.deriveResumeTarget({
+      ...base,
+      state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+      result: state.AUTOMATION_RESULT.HAS_RESULT,
+      queryId: "query-7",
+    }).targetPage,
+    2,
+  );
 
   // 两页站点跑完：同样的页数据，但状态是 DONE，而不是 PARTIAL_COMPLETE。
   const done = derive({

@@ -209,18 +209,20 @@ const automationLabels = {
   [AUTOMATION_STATES.DONE]: "查询与留痕已完成",
 };
 /**
- * 未完成的核查（第 1 页或第 2 页的 checkpoint）：显示真实进度，并把它作为主要动作。
- * 继续沿用同一个 Query 与同一份已完成留痕，不会从第 1 条重新开始。
+ * 可继续的检查点（任意页的未完成进度，或 legacy 的部分完成）：显示真实进度，并把它
+ * 作为主要动作。继续沿用同一个 Query 与同一份已完成留痕，不会从第 1 条重新开始，
+ * 也不会重复任何一页已经生成的留痕。
  *
- * 第 2 页的 checkpoint 会先重新建立查询页面并重新完成安全验证，然后跳回第 2 页，
+ * 非第 1 页的检查点会先重新建立查询页面并重新完成安全验证，然后定位回该页，
  * 因此文案必须说清"会重新验证"，而不是让用户以为点一下就能接着跑。
  */
 function unfinishedProgressLines(view) {
   const pageNo = view.currentPage ?? 1;
+  const totalPages = view.totalPages;
   const lines = ["本次核查未完成"];
   if (view.completedPageCount > 0)
     lines.push(
-      `✓ 已完成第 1–${view.completedPageCount} 页（网站共 ${view.totalPages ?? "未知"} 页）`,
+      `✓ 已完成第 1–${view.completedPageCount} 页（网站共 ${totalPages ?? "未知"} 页）`,
     );
   lines.push(
     view.listCaptureComplete
@@ -231,10 +233,12 @@ function unfinishedProgressLines(view) {
   );
   if (view.nextIncompleteCaseNo)
     lines.push(`下一项：${view.nextIncompleteCaseNo}`);
+  if (Number.isInteger(totalPages) && totalPages > view.completedPageCount)
+    lines.push(`剩余分页：第 ${view.completedPageCount + 1}–${totalPages} 页`);
   lines.push(
     pageNo > 1
-      ? "继续本次核查会重新建立查询页面、重新完成安全验证，然后跳回该页从下一个未完成项开始，不会重复已完成的留痕。"
-      : "继续本次核查将从下一个未完成项开始，不会重复已完成的留痕。",
+      ? "继续剩余分页核查会重新建立查询页面、重新完成安全验证，然后回到该页从下一个未完成项开始，一直核查到最后一页；已完成的留痕不会重复。"
+      : "继续剩余分页核查会从下一个未完成项开始，一直核查到最后一页；已完成的留痕不会重复。",
   );
   return lines;
 }
@@ -310,12 +314,14 @@ function renderAutomation() {
       );
     }
   } else if (progress.partialComplete) {
-    // 正常的部分完成：不是错误、也不是运行中，只是本轮不再继续翻页。
+    // legacy 稳定 checkpoint：连续页前缀已完整处理，仍有剩余页。
+    // Slice 5 起新的核查一律跑到最后一页（DONE），因此这个状态只来自旧版本；
+    // 它仍然是可继续的检查点，所以文案必须指向「继续剩余分页核查」。
     lines.push(
       `已自动处理第 1–${currentPage} 页`,
       `网站共 ${totalPages} 页`,
       `✓ 本次新增留痕：${progress.completedPageCaptureCount}`,
-      "后续分页暂未自动执行。请人工继续核查。",
+      "剩余分页尚未核查，可使用「继续剩余分页核查」完成。",
     );
   } else if (progress.firstPageComplete) {
     lines.push(

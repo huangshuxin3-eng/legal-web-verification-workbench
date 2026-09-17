@@ -28,11 +28,17 @@ async function modules() {
   return { state, adapter, workflow, identity };
 }
 
-const rowOf = (serial, name, caseNo, filingDate) => ({
+/**
+ * 结果行身份：name + caseNo + detailIdentity（filingDate 只是 metadata）。
+ * 默认身份由 serial 派生，需要构造同显示字段 / 同身份的行时显式覆盖。
+ */
+const rowOf = (serial, name, caseNo, filingDate, detailIdentity) => ({
   serial: String(serial),
   name,
   caseNo,
   filingDate,
+  detailIdentity: detailIdentity ?? `ID-${serial}`,
+  identityError: null,
   label: "查看",
 });
 
@@ -79,9 +85,9 @@ async function harness(result, options = {}) {
   const list = {
     rows: (options.rows || []).map((row) => ({ ...row })),
     pageNo: options.pageNo ?? 1,
-    // 本桩默认是**单页站点**：第 1 页即最后一页，因此第 1 页处理完是 DONE。
-    // 跨页（第 1 页 → 第 2 页 → PARTIAL_COMPLETE）由
-    // tests/zxgk-two-page-run.test.mjs 用专门的跨页桩覆盖。
+    // 本桩默认是**单页站点**：第 1 页即最后一页，因此第 1 页处理完是 DONE
+    // （Slice 5 起成功终态统一是 DONE）。跨页执行由
+    // tests/zxgk-multipage-run.test.mjs 与 tests/zxgk-two-page-run.test.mjs 覆盖。
     totalPages: options.totalPages ?? 1,
     totalSize: options.totalSize ?? (options.rows || []).length,
     fail: false,
@@ -704,7 +710,7 @@ test("DONE/FAILED/HAS_RESULT/FIRST_PAGE_COMPLETE 允许新一轮，运行中状�
     }),
     false,
   );
-  // PARTIAL_COMPLETE 是正常终止态，但**不开**自动继续 / 重新自动核查：
+  // PARTIAL_COMPLETE（legacy 稳定 checkpoint）仍然**不开**"再次自动核查"：
   // 再启动会从第 1 页重新产生一整套 Capture，容易被误解成「继续剩余分页」。
   assert.equal(
     state.canStartNewAutomation({
@@ -712,6 +718,7 @@ test("DONE/FAILED/HAS_RESULT/FIRST_PAGE_COMPLETE 允许新一轮，运行中状�
     }),
     false,
   );
+  // 但一个完全没有 checkpoint（没有 result / queryId）的 job 不给继续入口。
   assert.equal(
     state.canResumeAutomation({
       state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
@@ -840,7 +847,7 @@ test("HAS_RESULT 复用本轮 Query，先列表留痕再按展示顺序逐条处
   const keys = pageOneRows.map(adapter.buildRowKey);
 
   // 单页站点：第 1 页处理完就是全站完成（DONE），而不是 legacy 的
-  // FIRST_PAGE_COMPLETE。跨页停在第 2 页的形态见 zxgk-two-page-run.test.mjs。
+  // FIRST_PAGE_COMPLETE。跨页形态见 zxgk-multipage-run.test.mjs。
   assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   assert.deepEqual(
     job.completedPages.map((item) => item.pageNo),
@@ -917,9 +924,10 @@ test("expectedDetailCount 必须对应 N 个唯一 rowKey，缺一不可", async
 test("第一页解析：rowKey 含稳定结果身份，重复身份 fail closed", async () => {
   const { adapter } = await modules();
   const row = pageOneRows[0];
+  // 身份三段：name | caseNo | detailIdentity —— filingDate 不在其中。
   assert.equal(
     adapter.buildRowKey(row),
-    "某某集团有限公司|(2023)粤0305执4653号|2023年3月10日",
+    "某某集团有限公司|(2023)粤0305执4653号|ID-1",
   );
   // 空白与全角差异被轻度规范化，但内容不被改写。
   assert.equal(
@@ -928,6 +936,19 @@ test("第一页解析：rowKey 含稳定结果身份，重复身份 fail closed"
   );
   assert.notEqual(
     adapter.buildRowKey({ ...row, caseNo: "（2023）粤0305执4654号" }),
+    adapter.buildRowKey(row),
+  );
+  // 关键新契约：立案时间（含为空）不参与身份，detailIdentity 参与身份。
+  assert.equal(
+    adapter.buildRowKey({ ...row, filingDate: "" }),
+    adapter.buildRowKey(row),
+  );
+  assert.equal(
+    adapter.buildRowKey({ ...row, filingDate: "1999年1月1日" }),
+    adapter.buildRowKey(row),
+  );
+  assert.notEqual(
+    adapter.buildRowKey({ ...row, detailIdentity: "ID-1-另一个" }),
     adapter.buildRowKey(row),
   );
 
@@ -1769,8 +1790,8 @@ test("详情处理到第 6 条失败后，继续本次核查从第 6 条开始",
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
-  assert.notEqual(job.state, state.AUTOMATION_STATES.DONE);
+  // 单页站点：继续之后第 1 页（也就是最后一页）处理完，统一收尾成 DONE（Slice 5）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   // 不创建新 Query，也不切换 Query。
   assert.equal(named(run, "create-query").length, 1);
   assert.equal(job.queryId, "query-7");
@@ -1814,7 +1835,8 @@ test("列表已经留痕时，继续本次核查不会重复生成列表留痕",
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  // 单页站点：resume 之后统一收尾成 DONE（Slice 5 不再产生 FIRST_PAGE_COMPLETE）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   assert.equal(job.listCapture.capture_no, 3);
   assert.equal(
     named(run, "archive-existing-m4").filter(([, , tabId]) => tabId === 21)
@@ -1863,7 +1885,8 @@ test("Capture 已成功但尚未补记进度时，继续本次核查不重复留
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  // 单页站点：resume 之后统一收尾成 DONE（Slice 5 不再产生 FIRST_PAGE_COMPLETE）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   // 第 3 条没有再次留痕：共 11 份 = 1 列表 + 10 详情，编号连续且不重复。
   assert.equal(named(run, "archive-existing-m4").length, 11);
   assert.equal(job.listCapture.capture_no, 3);
@@ -1893,7 +1916,8 @@ test("currentOperation 没有 captureId 时，继续本次核查会重试该条"
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  // 单页站点：resume 之后统一收尾成 DONE（Slice 5 不再产生 FIRST_PAGE_COMPLETE）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   // 第 3 条被重试一次，且只重试一次。
   assert.deepEqual(
     named(run, "open-detail").map(([, rowKey]) => rowKey),
@@ -1949,8 +1973,8 @@ test("列表留痕 finalize 成功但尚未补记时，继续本次核查绝不�
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
-  assert.notEqual(job.state, state.AUTOMATION_STATES.DONE);
+  // 单页站点：继续之后第 1 页（也就是最后一页）处理完，统一收尾成 DONE（Slice 5）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   // 列表全程只归档过一次：绝不重复 Capture 列表，也没有多消耗一个编号。
   assert.equal(
     named(run, "archive-existing-m4").filter(([, , tabId]) => tabId === 21)
@@ -1999,7 +2023,8 @@ test("列表留痕在 finalize 返回前中断时，继续本次核查会重新�
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  // 单页站点：resume 之后统一收尾成 DONE（Slice 5 不再产生 FIRST_PAGE_COMPLETE）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   // 记录当前已知行为：本地没有成功标记，因此继续时会再归档一次列表。
   // 关闭它需要把稳定的 request_id 透传给 M4 归档链路（reserve_capture_upload
   // 已按 p_capture_id 幂等，见 supabase/migrations/202609140004_milestone_4.sql），
@@ -2030,7 +2055,8 @@ test("继续本次核查时页面顺序变化但集合一致，仍按原冻结 r
   const job = await run.automation.continueAfterVerification({
     taskId: executionTask.id,
   });
-  assert.equal(job.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  // 单页站点：resume 之后统一收尾成 DONE（Slice 5 不再产生 FIRST_PAGE_COMPLETE）。
+  assert.equal(job.state, state.AUTOMATION_STATES.DONE);
   assert.deepEqual(
     named(run, "open-detail").slice(3).map(([, rowKey]) => rowKey),
     keys.slice(2),
@@ -2199,20 +2225,69 @@ test("canResumeAutomation 只在存在可恢复检查点时为真", async () => 
     false,
     "第 1 页尚未完成时第 2 页不可恢复",
   );
-  // 第 3 页及以后没有安全的 fresh resume 路径（本切片只有两页边界）。
+  // 第 3 页及以后同样可恢复：Slice 5 起恢复目标恒为 persisted 的 currentPage，
+  // 不再存在"只支持前两页"的边界，也不推导 currentPage + 1。
+  const thirdPage = {
+    ...base,
+    currentPage: 3,
+    totalPages: 21,
+    pageFrozenKeys: ["k3"],
+    completedPages: [
+      { pageNo: 1, detailCount: 1 },
+      { pageNo: 2, detailCount: 1 },
+    ],
+  };
+  assert.deepEqual(state.deriveResumeTarget(thirdPage), {
+    ok: true,
+    targetPage: 3,
+  });
+  assert.equal(state.canResumeAutomation(thirdPage), true);
+  // 当前页已完整处理（completedPages 覆盖到 currentPage）也仍然可恢复：通用引擎会先
+  // 重新证明该页完整，再发出一次 business advance。
+  assert.deepEqual(
+    state.deriveResumeTarget({
+      ...base,
+      currentPage: 7,
+      totalPages: 21,
+      pageFrozenKeys: ["k7"],
+      completedPages: Array.from({ length: 7 }, (_, index) => ({
+        pageNo: index + 1,
+        detailCount: 1,
+      })),
+    }),
+    { ok: true, targetPage: 7 },
+  );
+  // 完成记录与页坐标自相矛盾时 fail closed：不猜页、不修复数据。
   assert.equal(
     state.canResumeAutomation({
       ...base,
-      currentPage: 3,
+      currentPage: 7,
       totalPages: 21,
-      pageFrozenKeys: ["k3"],
-      completedPages: [
-        { pageNo: 1, detailCount: 1 },
-        { pageNo: 2, detailCount: 1 },
-      ],
+      pageFrozenKeys: ["k7"],
+      completedPages: [{ pageNo: 1, detailCount: 1 }],
     }),
     false,
   );
+  // legacy PARTIAL_COMPLETE（连续完整前缀 1..K，仍有剩余页）是正确的可继续检查点：
+  // Slice 5 起新核查一律跑到 DONE，因此它只可能来自旧版本。
+  const legacyPartial = {
+    ...base,
+    state: state.AUTOMATION_STATES.PARTIAL_COMPLETE,
+    currentPage: 2,
+    totalPages: 21,
+    pageFrozenKeys: ["k2"],
+    completedPages: [
+      { pageNo: 1, detailCount: 1 },
+      { pageNo: 2, detailCount: 1 },
+    ],
+  };
+  assert.deepEqual(state.deriveResumeTarget(legacyPartial), {
+    ok: true,
+    targetPage: 2,
+  });
+  assert.equal(state.canResumeAutomation(legacyPartial), true);
+  // 但它仍然不允许"再次自动核查"：那会从第 1 页重造一整套 Capture。
+  assert.equal(state.canStartNewAutomation(legacyPartial), false);
   // checkpoint identity 已经失效时不再提供「继续本次核查」：resume 只会重复同一个失败。
   assert.equal(
     state.canResumeAutomation({ ...base, errorCode: "TOTAL_PAGES_CHANGED" }),
@@ -2230,6 +2305,7 @@ test("canResumeAutomation 只在存在可恢复检查点时为真", async () => 
     true,
     "临时性失败仍然是可恢复的",
   );
+  // 缺页坐标 / baseline 的 PARTIAL_COMPLETE 仍然不可恢复（没有可比对的结果集身份）。
   assert.equal(
     state.canResumeAutomation({
       ...base,
@@ -2241,13 +2317,13 @@ test("canResumeAutomation 只在存在可恢复检查点时为真", async () => 
   );
 });
 
-test("Side Panel 提供「继续本次核查」，与重新开始区分", async () => {
+test("Side Panel 提供「继续剩余分页核查」，与重新开始区分", async () => {
   const [panel, html] = await Promise.all([
     readFile(new URL("../src/sidepanel.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/sidepanel.html", import.meta.url), "utf8"),
   ]);
   assert.match(html, /id="automation-resume"/);
-  assert.match(html, /继续本次核查/);
+  assert.match(html, /继续剩余分页核查/);
   assert.match(html, /id="automation-resume-block"/);
   assert.match(panel, /deriveZxgkAutomationProgressViewModel\(automationJob\)/);
   assert.match(panel, /const resumable = progress\.canResume/);
@@ -2261,7 +2337,7 @@ test("Side Panel 提供「继续本次核查」，与重新开始区分", async 
   assert.doesNotMatch(panel, /自动核查完成|全部核查完成|已全部留痕/);
 });
 
-test("worker 暴露继续本次核查，且复用共享归档链路", async () => {
+test("worker 暴露继续剩余分页核查，且复用共享归档链路", async () => {
   const worker = await readFile(
     new URL("../src/worker.mjs", import.meta.url),
     "utf8",
@@ -2451,7 +2527,7 @@ test("新建标签页后，人工验证 → reconcile → 继续未完成项照�
     reads.every((call) => call[1] === newTabId),
     true,
   );
-  assert.equal(finished.state, state.AUTOMATION_STATES.FIRST_PAGE_COMPLETE);
+  assert.equal(finished.state, state.AUTOMATION_STATES.DONE);
   assert.deepEqual(finished.completedDetailKeys, keys);
   // 列表没有因为换标签页而重复留痕：继续后只归档了 8 条未完成详情，
   // 列表仍是第一轮那一份（capture_no 仍为 3），详情编号据此连续不重复。
@@ -2467,7 +2543,13 @@ test("新建标签页后，人工验证 → reconcile → 继续未完成项照�
     finished.detailCaptures.map((item) => item.captureNo),
     [4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
   );
-  assert.equal(finished.firstPageComplete.detailCount, 10);
+  // Slice 5：终态是 DONE，完成摘要由 completedPages 承载，不再写 legacy 完成标记。
+  assert.equal(finished.firstPageComplete, null);
+  assert.deepEqual(
+    finished.completedPages.map((item) => item.pageNo),
+    [1],
+  );
+  assert.equal(finished.completedPages[0].detailCount, 10);
   // 依旧没有任何分页动作。
   assert.equal(named(run, "click-page").length, 0);
 });
