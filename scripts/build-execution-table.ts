@@ -12,8 +12,8 @@
  */
 
 import { readdirSync, readFileSync } from "node:fs";
-import { join, resolve, sep } from "node:path";
-import os from "node:os";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
 import { getDocumentProxy } from "unpdf";
 import {
@@ -36,11 +36,17 @@ const EXCLUDED_HEADERS = [
 
 const EXCLUDED_WIDTHS = [6, 10, 40, 52];
 
-const defaultOutPath = join(
-  os.homedir(),
-  "Desktop",
-  "ZXGK执行记录核对表_20260917.xlsx",
+// 产物落在仓库外的独立输出目录（与仓库并列，不进 git），按批次日期归档，
+// 避免把 Excel / PDF / docx 乃至核查数据混进仓库，也不再堆在桌面。
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const OUTPUT_ROOT = join(
+  REPO_ROOT,
+  "..",
+  "nonlit-workbench-output",
+  "20260917",
 );
+
+const defaultOutPath = join(OUTPUT_ROOT, "ZXGK执行记录核对表_20260917.xlsx");
 
 async function readPages(bytes: Uint8Array): Promise<TextRun[][]> {
   const doc = await getDocumentProxy(bytes);
