@@ -11,6 +11,8 @@ import { taskCaptureCounts, type TaskWithQueryCount } from "@/lib/queries";
 import { createTask, updateTask } from "@/lib/task-repository";
 import { ProjectDeleteDialog } from "./project-delete-dialog";
 import { ProjectExportDialog } from "./project-export-dialog";
+import { ProjectReportDialog } from "./project-report-dialog";
+import { isReportTask } from "@/lib/report-names";
 import { TaskDeleteDialog } from "./task-delete-dialog";
 import {
   TaskBatchDeleteDialog,
@@ -63,6 +65,7 @@ export function ProjectWorkspace({
   );
   const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [reportOpen, setReportOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<TaskPageSize>(25);
   const load = useCallback(async () => {
@@ -160,6 +163,18 @@ export function ProjectWorkspace({
       0,
     ),
   };
+  // 「生成尽调报告」只做 coarse check：范围内是否有 Task、是否有留痕。
+  // 是否存在详情页、能否完整解析、是否跨核查日，一律由服务端 authoritative 判定。
+  const reportTasks = tasks.filter(isReportTask);
+  const reportCaptureCount = reportTasks.reduce(
+    (sum, task) => sum + task.capture_count,
+    0,
+  );
+  const reportBlockedReason = reportTasks.length
+    ? reportCaptureCount
+      ? ""
+      : "执行留痕尚未产生，请先完成网核"
+    : "当前项目没有中国执行信息公开网的执行任务";
   async function save(input: TaskInput) {
     const data =
       editor === "new"
@@ -259,6 +274,14 @@ export function ProjectWorkspace({
           </p>
         </div>
         <div className="flex flex-wrap gap-3">
+          <button
+            className="btn"
+            disabled={!!reportBlockedReason}
+            title={reportBlockedReason || undefined}
+            onClick={() => setReportOpen(true)}
+          >
+            生成尽调报告
+          </button>
           <button className="btn" onClick={() => setExportOpen(true)}>
             导出网核成果
           </button>
@@ -295,6 +318,11 @@ export function ProjectWorkspace({
               </div>
             )}
           </div>
+          {reportBlockedReason && (
+            <span className="self-center text-xs text-amber-700">
+              {reportBlockedReason}
+            </span>
+          )}
         </div>
       </div>
       {(createdNotice > 0 || skippedNotice > 0) && (
@@ -661,6 +689,20 @@ export function ProjectWorkspace({
           tasks={selectedTasks}
           onClose={() => setBatchDeleteOpen(false)}
           onCompleted={handleBatchDeleted}
+        />
+      )}
+      {reportOpen && (
+        <ProjectReportDialog
+          projectId={projectId}
+          projectName={project.name}
+          taskCount={reportTasks.length}
+          captureCount={reportCaptureCount}
+          onClose={() => setReportOpen(false)}
+          onGenerated={() => {
+            setReportOpen(false);
+            setNoticeTone("success");
+            setNotice("尽调报告已生成并开始下载。");
+          }}
         />
       )}
       {exportOpen && (
