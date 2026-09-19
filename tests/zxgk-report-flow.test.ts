@@ -50,6 +50,7 @@ import {
   generateZxgkReportDocx,
   mapWithConcurrency,
   normalizeQueryText,
+  parseProjectReport,
   renderZxgkReportDocx,
   resolveCheckDate,
   selectCanonicalQuery,
@@ -635,6 +636,85 @@ test("Workbench 提供报告入口、coarse check 与防重复提交", async () 
   assert.match(dialog, /\/api\/projects\/\$\{projectId\}\/report/);
   assert.match(dialog, /if \(lock\.current \|\| !captureCount\) return/);
   assert.match(dialog, /disabled=\{busy \|\| !captureCount\}/);
+});
+
+// ── 事实边界：AI 分析与 DOCX 渲染共用同一份事实 ─────────────────────────
+
+/** 用捕获下标当字节的假 loadCapture（与并发夹具同源）。 */
+const loaderFromIndex = async (storagePath: string) =>
+  new Blob([new Uint8Array([Number(/c-(\d+)\.pdf$/.exec(storagePath)?.[1])])]);
+
+test("parseProjectReport 暴露已解析事实：项目名、核查日、行序与排除计数", async () => {
+  const facts = await parseProjectReport({
+    projectName: "北京术锐机器人有限公司",
+    tasks: [concurrentTask(2)],
+    loadCapture: loaderFromIndex,
+    readPages: pagesFromBytes,
+  });
+  assert.equal(facts.projectName, "北京术锐机器人有限公司");
+  assert.equal(facts.checkDate, "2026-09-17");
+  assert.equal(facts.checkDateLabel, "2026年9月17日");
+  assert.equal(facts.result.problems.length, 0);
+  assert.deepEqual(
+    facts.result.rows.map((item) => item.index),
+    [1, 2],
+  );
+  assert.equal(facts.skippedNonPdf, 0);
+});
+
+test("AI 分析的事实与 DOCX 报告同源：同一批留痕得到同样的口径", async () => {
+  const source = {
+    projectName: "北京术锐机器人有限公司",
+    tasks: [concurrentTask(2)],
+    loadCapture: loaderFromIndex,
+    readPages: pagesFromBytes,
+  };
+  const facts = await parseProjectReport(source);
+  const report = await generateZxgkReportDocx(source);
+  assert.equal(report.records, facts.result.rows.length);
+  assert.equal(report.checkDate, facts.checkDate);
+  assert.equal(report.checkDateLabel, facts.checkDateLabel);
+  assert.equal(report.excludedCaptures, facts.result.excluded.length);
+  assert.equal(report.skippedNonPdf, facts.skippedNonPdf);
+});
+
+test("parseProjectReport 沿用同一 fail closed：范围不符时在读 PDF 之前就拒绝", async () => {
+  let loaded = 0;
+  await assert.rejects(
+    parseProjectReport({
+      projectName: "北京术锐机器人有限公司",
+      tasks: [task({ id: "t-1", topic: "商标" })],
+      loadCapture: async () => {
+        loaded += 1;
+        return new Blob();
+      },
+    }),
+    (error: unknown) =>
+      error instanceof CaptureOperationError &&
+      error.status === 409 &&
+      error.message === NO_TASK_MESSAGE,
+  );
+  assert.equal(loaded, 0);
+});
+
+test("parseProjectReport 不产出「空事实」：没有任何有效详情行时 fail closed", async () => {
+  await assert.rejects(
+    parseProjectReport({
+      projectName: "北京术锐机器人有限公司",
+      tasks: [
+        task({
+          id: "t-1",
+          queries: [query("q-1", 1, "恒大集团有限公司")],
+          captures: [capture("c-png", "q-1", 1, "png")],
+        }),
+      ],
+      loadCapture: async () => new Blob(),
+    }),
+    (error: unknown) =>
+      error instanceof CaptureOperationError &&
+      error.status === 409 &&
+      error.message === NO_DETAIL_MESSAGE,
+  );
 });
 
 // ── 16 / 17. 有界并发：并发度、顺序、失败确定性 ───────────────────────────

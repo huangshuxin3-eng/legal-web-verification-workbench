@@ -7,7 +7,11 @@
  *   selectReportCaptures(tasks)               ← 纯函数：范围 → canonical Query → 稳定排序 → 业务文件名
  *   resolveCheckDate(days)                    ← 纯函数：核查日仲裁（跨日 fail closed）
  *   readPages → classifyCapture → parseExecutionTable   ← 复用已验收的解析器
+ *   parseProjectReport(options)               ← **事实边界**：到此为止即为「已解析、已校验的结构化事实」
  *   buildReportModel → renderReportDocx → Packer.toBuffer ← 复用已验收的报告模型与渲染器
+ *
+ * `parseProjectReport` 同时是 AI 分析（`/api/projects/[projectId]/analysis`）的输入边界：
+ * 报告与 AI 分析共用同一份事实，AI 侧拿不到、也不需要原始 PDF 文本。
  *
  * 明确不做（人工口径 LOCK）：
  *   1. 不新增「项目名称 === task.entity_name」之类的 mismatch 校验：报告标题用项目名称，
@@ -342,14 +346,36 @@ export async function mapWithConcurrency<Item, Result>(
   return results;
 }
 
-/** 完整流程：选择留痕 → 有界并发下载 / 读 PDF → 解析 → 渲染。 */
-export async function generateZxgkReportDocx(options: {
+/** 已解析、已校验的报告事实：DOCX 渲染与 AI 分析共用的**唯一**输入边界。 */
+export type ProjectReportFacts = {
+  projectName: string;
+  /** 核查日 `YYYY-MM-DD`（文件名口径）。 */
+  checkDate: string;
+  /** 核查日报告语体（正文口径），例如「2026年9月17日」。 */
+  checkDateLabel: string;
+  /** 结构化事实。AI 分析只允许消费这里，不允许接触原始 PDF 文本。 */
+  result: ParseResult;
+  skippedNonPdf: number;
+};
+
+export type ProjectReportSource = {
   projectName: string;
   tasks: readonly ZxgkReportTask[];
   loadCapture: (storagePath: string) => Promise<Blob>;
   /** 仅供测试注入；缺省即真实 `readPages`（与 `loadCapture` 同一注入模式）。 */
   readPages?: (bytes: Uint8Array) => Promise<TextRun[][]>;
-}): Promise<ZxgkReportDocument> {
+};
+
+/**
+ * 选择留痕 → 有界并发下载 / 读 PDF → 解析 → 事实校验，**到此为止**。
+ *
+ * DOCX 渲染（`generateZxgkReportDocx`）与 AI 分析（analysis route）都从这里取事实，
+ * 因此两者看到的范围、顺序、核查日与排除计数必然一致，不会各算一份。
+ * 解析不完整（`problems` 非空）与「没有任何可解析留痕」都在这里 fail closed。
+ */
+export async function parseProjectReport(
+  options: ProjectReportSource,
+): Promise<ProjectReportFacts> {
   const selection = selectReportCaptures(options.tasks);
   const readPagesImpl = options.readPages ?? readPages;
 
@@ -374,11 +400,30 @@ export async function generateZxgkReportDocx(options: {
 
   const checkDate = resolveCheckDate(detailDays);
   const result = parseExecutionTable(inputs);
-  return renderZxgkReportDocx({
+  if (result.problems.length)
+    throw new CaptureOperationError(unparsableMessage(result.problems), 409);
+  // 与渲染层同口径：没有任何有效详情行时 fail closed，不产出「空事实」。
+  if (!result.rows.length)
+    throw new CaptureOperationError(NO_DETAIL_MESSAGE, 409);
+  return {
     projectName: options.projectName,
-    result,
     checkDate,
+    checkDateLabel: checkDateLabel(checkDate),
+    result,
     skippedNonPdf: selection.skippedNonPdf,
+  };
+}
+
+/** 完整流程：选择留痕 → 有界并发下载 / 读 PDF → 解析 → 渲染。 */
+export async function generateZxgkReportDocx(
+  options: ProjectReportSource,
+): Promise<ZxgkReportDocument> {
+  const facts = await parseProjectReport(options);
+  return renderZxgkReportDocx({
+    projectName: facts.projectName,
+    result: facts.result,
+    checkDate: facts.checkDate,
+    skippedNonPdf: facts.skippedNonPdf,
   });
 }
 

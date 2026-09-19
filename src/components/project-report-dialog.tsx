@@ -4,6 +4,14 @@ import { useRef, useState } from "react";
 import { captureRequest, CaptureClientError } from "@/lib/capture-client";
 import { errorMessage } from "@/lib/tasks";
 import { REPORT_SOURCE_NAME, REPORT_TOPIC } from "@/lib/report-names";
+import {
+  ANALYSIS_DRAFT_LABEL,
+  ANALYSIS_RESPONSE_INVALID_MESSAGE,
+  ANALYSIS_SECTION_KEYS,
+  ANALYSIS_SECTION_TITLES,
+  ANALYSIS_SESSION_ONLY_NOTE,
+  type AnalysisDraft,
+} from "@/lib/analysis-names";
 import { useAuth } from "./auth-provider";
 import { Dialog } from "./dialog";
 
@@ -38,6 +46,11 @@ export function ProjectReportDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const lock = useRef(false);
+  // AI 分析草稿（Slice 1）：只在本次弹窗会话内存在，不落库、不进 DOCX。
+  const [analysis, setAnalysis] = useState<AnalysisDraft | null>(null);
+  const [analysisBusy, setAnalysisBusy] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
+  const analysisLock = useRef(false);
 
   async function generate() {
     if (lock.current || !captureCount) return;
@@ -70,8 +83,51 @@ export function ProjectReportDialog({
     }
   }
 
+  /** 服务端草稿必须恰好是四段非空字符串；否则按请求失败处理，不显示半成品。 */
+  function readDraft(body: unknown): AnalysisDraft {
+    const draft = (body as { draft?: unknown } | null)?.draft;
+    if (!draft || typeof draft !== "object" || Array.isArray(draft))
+      throw new CaptureClientError(ANALYSIS_RESPONSE_INVALID_MESSAGE);
+    const source = draft as Record<string, unknown>;
+    const next = {} as AnalysisDraft;
+    for (const key of ANALYSIS_SECTION_KEYS) {
+      const value = source[key];
+      if (typeof value !== "string" || !value.trim())
+        throw new CaptureClientError(ANALYSIS_RESPONSE_INVALID_MESSAGE);
+      next[key] = value;
+    }
+    return next;
+  }
+
+  /** 生成分析草稿：事实由服务端解析，客户端不提交任何事实或提示词文本。 */
+  async function generateAnalysis() {
+    if (analysisLock.current || !captureCount) return;
+    analysisLock.current = true;
+    setAnalysisBusy(true);
+    setAnalysisError("");
+    try {
+      const response = await captureRequest(
+        db,
+        `/api/projects/${projectId}/analysis`,
+        { method: "POST" },
+      );
+      setAnalysis(readDraft(await response.json().catch(() => null)));
+    } catch (error) {
+      // 失败即清空草稿：宁可没有草稿，也不留下看起来可用的半成品。
+      setAnalysis(null);
+      setAnalysisError(
+        error instanceof CaptureClientError
+          ? error.message
+          : errorMessage(error),
+      );
+    } finally {
+      analysisLock.current = false;
+      setAnalysisBusy(false);
+    }
+  }
+
   return (
-    <Dialog title="生成尽调报告" onClose={onClose} busy={busy}>
+    <Dialog title="生成尽调报告" onClose={onClose} busy={busy || analysisBusy}>
       <p className="text-sm text-slate-600">
         报告范围为本项目中「{REPORT_SOURCE_NAME}」的{REPORT_TOPIC}
         任务，每个任务只取当前检索词对应的详情留痕；列表页自动排除。
@@ -104,9 +160,50 @@ export function ProjectReportDialog({
           {error}
         </p>
       )}
+      {analysisError && (
+        <p className="error mb-4" role="alert">
+          {analysisError}
+        </p>
+      )}
+      {analysis && (
+        <section className="mt-5 border-t border-slate-200 pt-4">
+          <h3 className="text-sm font-semibold">{ANALYSIS_DRAFT_LABEL}</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            {ANALYSIS_SESSION_ONLY_NOTE}
+          </p>
+          <div className="mt-3 space-y-3">
+            {ANALYSIS_SECTION_KEYS.map((key) => (
+              <label key={key} className="block">
+                <span className="text-sm text-slate-600">
+                  {ANALYSIS_SECTION_TITLES[key]}
+                </span>
+                <textarea
+                  className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm"
+                  rows={4}
+                  value={analysis[key]}
+                  disabled={analysisBusy}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setAnalysis((previous) =>
+                      previous ? { ...previous, [key]: value } : previous,
+                    );
+                  }}
+                />
+              </label>
+            ))}
+          </div>
+        </section>
+      )}
       <div className="flex justify-end gap-3">
         <button className="btn" disabled={busy} onClick={onClose}>
           取消
+        </button>
+        <button
+          className="btn"
+          disabled={analysisBusy || busy || !captureCount}
+          onClick={() => void generateAnalysis()}
+        >
+          {analysisBusy ? "正在分析…" : "生成 AI 分析"}
         </button>
         <button
           className="btn primary"
