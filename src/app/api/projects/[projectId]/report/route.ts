@@ -1,6 +1,7 @@
 import { apiError, captureContext, validId } from "@/lib/server/capture-api";
 import { CaptureOperationError } from "@/lib/capture-workflow";
 import { REPORT_MIME_TYPE } from "@/lib/report-names";
+import { loadAnalysisDraft } from "@/lib/server/analysis-draft";
 import {
   downloadReportCapture,
   generateZxgkReportDocx,
@@ -27,10 +28,14 @@ export async function GET(request: Request, context: Context) {
   try {
     const { userDb } = await captureContext(request);
     const data = await loadProjectReportData(userDb, projectId);
+    // AI 分析草稿是**可选输入**：没有草稿就是既有非 AI 报告，语义完全不变；
+    // 已确认但基于旧事实时，generateZxgkReportDocx 会抛 409，绝不静默写入过期分析。
+    const analysisDraft = await loadAnalysisDraft(userDb, projectId);
     const report = await generateZxgkReportDocx({
       projectName: data.projectName,
       tasks: data.tasks,
       loadCapture: (storagePath) => downloadReportCapture(userDb, storagePath),
+      analysisDraft,
     });
     return new Response(new Uint8Array(report.buffer), {
       headers: {

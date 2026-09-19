@@ -12,7 +12,10 @@
  *   5. 义务全文不截断
  *   6. 三节归属：纵向 → 横向 → 纵向，表题与表格同节
  *   7. 模板文字：只陈述数据已确定的事实，不含 AI/风险/评分
+ *      （例外：Slice 2 的「核查分析」章节**仅**在传入已人工确认的分析时出现，
+ *       且该章节自带一句固定的非法律意见说明；不传时报告逐字回到既有形态）
  *   8. 纯排版规则：长标题折行不产生残行、主表金额不被断行、证据行不被孤立到下一页
+ *   9. AI 分析章节的插入位置、序号顺延与四小节结构（Slice 2）
  */
 
 import assert from "node:assert/strict";
@@ -27,8 +30,11 @@ import {
   DRAFT_NOTICE,
   LANDSCAPE_TEXT_WIDTH_MM,
   PORTRAIT_TEXT_WIDTH_MM,
+  REPORT_ANALYSIS_HEADING,
+  REPORT_ANALYSIS_NOTICE,
   REPORT_TABLE_COLUMNS,
   REPORT_TABLE_WIDTH_MM,
+  SECTION_ORDINALS,
   TITLE_SIZE_HALF_PT,
   TITLE_TAIL,
   buildReportModel,
@@ -40,6 +46,7 @@ import {
   renderReportSupplement,
   renderReportTable,
   textWidthMm,
+  type ReportAnalysisSection,
   type ReportModel,
   type ReportSupplement,
   type ReportTable,
@@ -880,4 +887,114 @@ test("补充块的「对应证据」与上一段同页，不被单独挤到下�
   assert.equal(fieldsOnly, 3); // 标题 + 字段 + 证据
   const evidenceOnly = renderReportSupplement(supplements[2]).length;
   assert.equal(evidenceOnly, 2); // 标题 + 证据
+});
+
+// ── 12. AI 分析章节（Slice 2：只有已确认的分析才会被传进来）────────────────
+
+/** 取某一节里的段落文字（按文档顺序）。 */
+function linesOf(blocks: ReportModel["preamble"]): string[] {
+  return blocks
+    .filter((block) => block.kind === "paragraph")
+    .map((block) =>
+      block.kind === "paragraph"
+        ? block.spans.map((span) => span.text).join("")
+        : "",
+    );
+}
+
+/** 四段已确认分析；标题与唯一口径 `ANALYSIS_SECTION_TITLES` 一致（见下方断言）。 */
+const ANALYSIS: ReportAnalysisSection[] = [
+  {
+    title: "核查结果概览",
+    text: "本次核查共纳入 2 条记录。\n均为失信被执行人公示。",
+  },
+  { title: "重点关注事项", text: "重点关注执行标的金额较大的记录。" },
+  { title: "重点记录", text: "原始序号1｜（2026）粤03执1号｜失信被执行人" },
+  { title: "建议进一步核实事项", text: "现有核查信息不足以判断。" },
+];
+
+test("不带分析：章节序号仍是 一/二/三，报告里不出现任何 AI 章节字样", () => {
+  const model = buildReportModel(result([row(1)]), META);
+  const preamble = linesOf(model.preamble);
+  assert.ok(preamble.includes("一、核查说明"));
+  assert.ok(
+    !paragraphs(model).some((line) => line.includes(REPORT_ANALYSIS_HEADING)),
+  );
+  assert.ok(
+    !paragraphs(model).some((line) => line.includes(REPORT_ANALYSIS_NOTICE)),
+  );
+  assert.equal(linesOf(model.landscape)[0], "二、执行及失信公开信息明细");
+  assert.equal(linesOf(model.appendix)[0], "三、律师提示");
+  // 第 1 节仍止于列示说明末项：AI 章节不存在时不留下任何占位段落
+  assert.ok(
+    preamble.at(-1)?.endsWith("表 1“备注”栏留空者，系不存在需说明的事项。"),
+  );
+});
+
+test("带分析：新增「二、核查分析」，固定说明紧随标题，后续章节序号整体顺延", () => {
+  const model = buildReportModel(result([row(1)]), {
+    ...META,
+    analysis: ANALYSIS,
+  });
+  const preamble = linesOf(model.preamble);
+  const heading = `${SECTION_ORDINALS[1]}、${REPORT_ANALYSIS_HEADING}`;
+  const headingAt = preamble.indexOf(heading);
+  assert.ok(headingAt >= 0, "应出现「二、核查分析（AI辅助，经人工确认）」");
+  // 固定说明紧跟章节标题（逐字固定，不可省略）
+  assert.equal(preamble[headingAt + 1], REPORT_ANALYSIS_NOTICE);
+  assert.ok(REPORT_ANALYSIS_NOTICE.includes("不构成正式法律意见"));
+  // 四小节：标题按固定序号，正文紧跟其后；正文里的换行被拆成独立段落
+  for (const [position, section] of ANALYSIS.entries()) {
+    const title = `（${SECTION_ORDINALS[position]}）${section.title}`;
+    const at = preamble.indexOf(title);
+    assert.ok(at > headingAt, `缺少小节标题：${title}`);
+    section.text
+      .split("\n")
+      .forEach((line, offset) =>
+        assert.equal(
+          preamble[at + 1 + offset],
+          line,
+          `小节正文应原样写入：${title}`,
+        ),
+      );
+  }
+  // 序号顺延：明细变「三、」、律师提示变「四、」
+  assert.equal(linesOf(model.landscape)[0], "三、执行及失信公开信息明细");
+  assert.equal(linesOf(model.appendix)[0], "四、律师提示");
+  // AI 章节留在第 1 纵向节内：第 2 节结构（表题 + 表格）不受影响
+  assert.deepEqual(
+    model.landscape.map((block) => block.kind),
+    ["paragraph", "paragraph", "table"],
+  );
+  assert.ok(
+    !model.preamble.some((block) => block.kind === "table"),
+    "AI 章节不得把表格带进纵向节",
+  );
+  assert.ok(
+    !linesOf(model.landscape).some((line) =>
+      line.includes(REPORT_ANALYSIS_HEADING),
+    ),
+    "AI 章节不得落到横向节",
+  );
+});
+
+test("analysis 为空数组：等价于不带 AI 章节，不产生空章节", () => {
+  const withEmpty = buildReportModel(result([row(1)]), {
+    ...META,
+    analysis: [],
+  });
+  assert.deepEqual(withEmpty, buildReportModel(result([row(1)]), META));
+});
+
+test("AI 小节标题与界面口径同源（ANALYSIS_SECTION_TITLES），不各写一份", async () => {
+  const { ANALYSIS_SECTION_TITLES } =
+    await import("../src/lib/analysis-names.ts");
+  assert.deepEqual(
+    ANALYSIS.map((section) => section.title),
+    Object.values(ANALYSIS_SECTION_TITLES),
+  );
+  // 章节标题里的中文口径也必须是产品文案
+  assert.equal(REPORT_ANALYSIS_HEADING, "核查分析（AI辅助，经人工确认）");
+  assert.equal(SECTION_ORDINALS[1], "二");
+  assert.equal(SECTION_ORDINALS[2], "三");
 });

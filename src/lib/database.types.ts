@@ -1,3 +1,5 @@
+import type { AnalysisDraftRecord } from "./analysis-names.ts";
+
 export type ProjectStatus = "active" | "completed";
 export type TaskStatus =
   "not_started" | "in_progress" | "completed" | "blocked";
@@ -8,6 +10,11 @@ export type Project = {
   code: string | null;
   status: ProjectStatus;
   created_at: string;
+  /**
+   * AI 分析草稿（Slice 2）。一行一项目，形状见 `AnalysisDraftRecord`；
+   * 列类型是 jsonb，因此读取时**必须**过 `readAnalysisDraftRecord` 校验，不得直接断言。
+   */
+  analysis_draft: AnalysisDraftRecord | null;
 };
 export type Task = {
   id: string;

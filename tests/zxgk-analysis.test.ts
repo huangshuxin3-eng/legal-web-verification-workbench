@@ -1,12 +1,15 @@
 /**
- * AI 分析草稿（Slice 1 / 1.1 / 1.2）：提示词构造、输出结构校验与输出护栏的纯函数测试。
+ * AI 分析草稿（Slice 1 / 1.1 / 1.2 / 2）：提示词构造、输出结构校验、输出护栏与事实指纹
+ * 的纯函数测试。
  *
  * 只测**边界**：AI 能看到什么事实、看不到什么；模型输出不合规时是否 fail closed。
  * 不发起网络请求、不读 PDF、不连 DB、不读磁盘。
- * provider 调用本身（DeepSeek 请求形状 / 错误映射 / 超时）见 `zxgk-analysis-client.test.ts`。
+ * provider 调用本身（DeepSeek 请求形状 / 错误映射 / 超时）见 `zxgk-analysis-client.test.ts`；
+ * 落库形状 / 确认门禁 / API 方法见 `zxgk-analysis-draft.test.ts`。
  *
  * regression test（把已发生的真实 bug 固化成自动测试）按 Slice 归档：
- *   1.1「5. 输入最小化」「7. 输出护栏」；1.2「6. 确定性聚合」「7. 输出护栏」。
+ *   1.1「A. 输入最小化」「5. 输出护栏」；1.2「6. 确定性聚合」；
+ *   2.0「8. keyRecords 可追溯性」「9. 事实指纹」。
  */
 
 import assert from "node:assert/strict";
@@ -17,20 +20,24 @@ import { CaptureOperationError } from "../src/lib/capture-workflow.ts";
 import {
   ANALYSIS_DRAFT_LABEL,
   ANALYSIS_GUARDRAIL_MESSAGE,
+  ANALYSIS_PERSISTED_NOTE,
   ANALYSIS_RESPONSE_INVALID_MESSAGE,
-  ANALYSIS_SESSION_ONLY_NOTE,
   ANALYSIS_SECTION_KEYS,
   ANALYSIS_SECTION_TITLES,
   type AnalysisDraft,
 } from "../src/lib/analysis-names.ts";
 import {
   ANALYSIS_FACTS_MARKER,
+  ANALYSIS_KEY_RECORDS_LIMIT,
+  ANALYSIS_SOURCE_HASH_VERSION,
   ANALYSIS_SUMMARY_MARKER,
   ANALYSIS_SYSTEM_PROMPT,
   assertAnalysisDraftInScope,
   buildAnalysisPrompt,
+  buildAnalysisSourceHash,
   buildAnalysisSummary,
   findAnalysisGuardrailViolation,
+  findKeyRecordsViolation,
   parseAnalysisResponse,
   type AnalysisSummary,
 } from "../src/lib/server/ai-analysis.ts";
@@ -248,7 +255,7 @@ test("regression 1.2：提示词要求照抄系统统计、并禁止清单外记
 const VALID = JSON.stringify({
   overview: "本次核查共纳入 2 条记录。",
   keyRisks: "未发现需特别提示的事项",
-  keyRecords: "1、（2026）粤03执1234号",
+  keyRecords: "原始序号1｜（2026）粤03执1234号｜被执行人",
   followUps: "现有核查信息不足以判断",
 });
 
@@ -284,10 +291,13 @@ test("提示词里写死的 JSON 字段名与 ANALYSIS_SECTION_KEYS 一致", () 
     );
 });
 
-test("草稿标识明示非正式法律意见，且声明 Slice 1 不落库", () => {
+test("草稿标识明示非正式法律意见，且说明草稿会保存、只有确认后才进报告", () => {
   assert.ok(ANALYSIS_DRAFT_LABEL.includes("草稿"));
   assert.ok(ANALYSIS_DRAFT_LABEL.includes("非正式法律意见"));
-  assert.ok(ANALYSIS_SESSION_ONLY_NOTE.includes("关闭弹窗"));
+  // Slice 2：草稿已持久化 —— 旧口径「关闭弹窗后不会保留」必须消失（否则是假承诺）
+  assert.ok(ANALYSIS_PERSISTED_NOTE.includes("保存到本项目"));
+  assert.ok(ANALYSIS_PERSISTED_NOTE.includes("已确认"));
+  assert.ok(!ANALYSIS_PERSISTED_NOTE.includes("关闭弹窗后不会保留"));
 });
 
 // ── 2. 输入边界：只允许结构化事实 ─────────────────────────────────────────
@@ -404,6 +414,11 @@ test("硬约束固定写在系统提示词里", () => {
     "现有核查信息不足以判断",
     "不是正式法律意见",
     "不要使用 Markdown 代码块",
+    // Slice 2 新增：keyRecords 可追溯性（第 12 条）
+    "最多 8 条",
+    "原始序号",
+    "禁止另行从 1 开始重新编号",
+    "会导致本次分析整体作废",
   ])
     assert.ok(ANALYSIS_SYSTEM_PROMPT.includes(phrase), `缺少约束：${phrase}`);
 });
@@ -498,7 +513,7 @@ function draftWith(
 /** 断言护栏拒绝：状态 502，且文案是**护栏**文案而非结构校验文案。 */
 function assertRejected(label: string, draft: AnalysisDraft) {
   assert.throws(
-    () => assertAnalysisDraftInScope(draft),
+    () => assertAnalysisDraftInScope(draft, ROWS),
     (error: unknown) =>
       error instanceof CaptureOperationError &&
       error.status === 502 &&
@@ -509,7 +524,7 @@ function assertRejected(label: string, draft: AnalysisDraft) {
 
 /** 断言护栏放行：返回的仍是一份完整四段草稿。 */
 function assertAllowed(label: string, draft: AnalysisDraft) {
-  const passed = assertAnalysisDraftInScope(draft);
+  const passed = assertAnalysisDraftInScope(draft, ROWS);
   assert.deepEqual(
     Object.keys(passed),
     ["overview", "keyRisks", "keyRecords", "followUps"],
@@ -559,7 +574,10 @@ test("regression D：日期逻辑判断 → 拒绝", () => {
 test("regression：正常描述与原样引用日期 → 放行", () => {
   assertAllowed(
     "日期原样引用",
-    draftWith("keyRecords", "1、（2026）粤03执1234号，立案时间为 2026-01-16。"),
+    draftWith(
+      "keyRecords",
+      "原始序号1｜（2026）粤03执1234号｜立案时间为 2026-01-16。",
+    ),
   );
   assertAllowed(
     "核查日原样引用",
@@ -718,6 +736,210 @@ test("护栏文案明确：告知整次放弃且未展示片段", () => {
   );
 });
 
+// ── 8. keyRecords 可追溯性（Slice 2 regression）───────────────────────────
+//
+// 第三次真实 E2E 的观察项：keyRecords 把挑出的一批记录**自行重新编号**，
+// 于是「分析里说的第 N 条」在报告主表里找不到对应行 —— 可追溯性断裂。
+// 修法是两头卡：提示词要求写「原始序号N｜…」（第 12 条），护栏机械拒绝三类越界形态
+// （超过 8 条 / 引用不存在的序号 / 行首自拟编号）。
+
+/** 构造指定 index 的事实行（只为可追溯性用例服务，字段内容无关紧要）。 */
+function rowsWithIndices(indices: readonly number[]): DetailRow[] {
+  return indices.map((index) => ({
+    index,
+    captureNo: index,
+    publicTypes: "被执行人",
+    remarks: "",
+    evidenceFile: `恒大集团有限公司_执行_中国执行信息公开网_Q01_${index}_20260917.pdf`,
+    fields: { 案号: `（2026）粤03执${index}号` },
+  }));
+}
+
+test("regression 2.0：keyRecords 保留原始 row.index → 允许", () => {
+  assertAllowed(
+    "引用真实存在的原始序号",
+    draftWith(
+      "keyRecords",
+      "原始序号1｜（2026）粤03执1234号｜被执行人，执行标的 1000000 元\n" +
+        "原始序号2｜（2026）粤03执1234号｜失信被执行人",
+    ),
+  );
+  // 只挑一条、序号不连续也合法 —— 引用的是清单里真实存在的序号即可
+  assertAllowed(
+    "只引用原始序号2",
+    draftWith("keyRecords", "原始序号2｜（2026）粤03执1234号｜失信被执行人"),
+  );
+  assertAllowed("没有重点记录", draftWith("keyRecords", "无"));
+});
+
+test("regression 2.0：超过 8 条原始序号引用 → 拒绝", () => {
+  const many = rowsWithIndices(
+    Array.from({ length: ANALYSIS_KEY_RECORDS_LIMIT + 1 }, (_, i) => i + 1),
+  );
+  const over = many
+    .map((row) => `原始序号${row.index}｜（2026）粤03执${row.index}号｜要点`)
+    .join("\n");
+  assert.equal(findKeyRecordsViolation(over, many), "key-records-limit");
+  // 正好 8 条、且序号都存在 → 放行（上限是「少量」，不是「越少越好」）
+  const atLimit = many
+    .slice(0, ANALYSIS_KEY_RECORDS_LIMIT)
+    .map((row) => `原始序号${row.index}｜（2026）粤03执${row.index}号｜要点`)
+    .join("\n");
+  assert.equal(findKeyRecordsViolation(atLimit, many), null);
+});
+
+test("regression 2.0：引用清单里不存在的序号 → 拒绝", () => {
+  const draft = draftWith(
+    "keyRecords",
+    "原始序号9｜（2023）辽01执1682号｜终本案件",
+  );
+  assert.equal(
+    findKeyRecordsViolation(draft.keyRecords, ROWS),
+    "key-records-unknown-index",
+  );
+  assertRejected("引用不存在的原始序号", draft);
+});
+
+test("regression 2.0：自行从 1 重新编号 → 拒绝", () => {
+  for (const text of [
+    "1、（2026）粤03执1234号",
+    "1. （2026）粤03执1234号",
+    "1｜（2026）粤03执1234号",
+    "2) （2026）粤03执1234号",
+  ])
+    assertRejected(text, draftWith("keyRecords", text));
+  // 真实 E2E 的形态：一段里既有自拟编号、也有「原始序号」字样
+  assertRejected(
+    "自拟编号与原始序号混排",
+    draftWith(
+      "keyRecords",
+      "1、原始序号1｜（2026）粤03执1234号\n2、原始序号2｜（2026）粤03执1234号",
+    ),
+  );
+});
+
+test("regression 2.0：keyRecords 检查只作用于该段，且不误伤数字开头的内容", () => {
+  // 别的段落里的普通编号不受 keyRecords 规则约束
+  assertAllowed(
+    "overview 里的编号",
+    draftWith("overview", "1. 本次核查共 2 条记录。"),
+  );
+  assertAllowed(
+    "followUps 里的编号",
+    draftWith("followUps", "1. 建议人工核对原件。"),
+  );
+  // 行首数字后紧跟的不是编号分隔符（金额、日期）→ 不是重新编号形态
+  assertAllowed(
+    "行首金额",
+    draftWith(
+      "keyRecords",
+      "原始序号1｜（2026）粤03执1234号\n1000000 元执行标的",
+    ),
+  );
+  assertAllowed(
+    "行首日期",
+    draftWith("keyRecords", "原始序号1｜（2026）粤03执1234号\n2026-01-16 立案"),
+  );
+});
+
+test("regression 2.0：keyRecords 规则名不进对外文案", () => {
+  for (const rule of [
+    "key-records-limit",
+    "key-records-unknown-index",
+    "key-records-renumbered",
+  ]) {
+    assert.ok(!ANALYSIS_GUARDRAIL_MESSAGE.includes(rule));
+  }
+  assert.ok(!ANALYSIS_GUARDRAIL_MESSAGE.includes("原始序号"));
+});
+
+// ── 9. 事实指纹（Slice 2）─────────────────────────────────────────────────
+//
+// 用途只有一个：stale detection —— 已确认的草稿是否仍对应现在的事实。
+// 三条硬要求：内容相同 → 同 hash；关键事实变化 → 变 hash；不受完成顺序影响。
+
+test("sourceHash：同一批 facts 永远得到同一个 hash", () => {
+  assert.equal(buildAnalysisSourceHash(FACTS), buildAnalysisSourceHash(FACTS));
+  assert.equal(
+    buildAnalysisSourceHash(FACTS),
+    buildAnalysisSourceHash({
+      ...FACTS,
+      rows: ROWS.map((row) => ({ ...row })),
+    }),
+    "同内容重新构造的行必须得到同一指纹",
+  );
+  // 字段键的插入顺序与事实无关：打乱后仍是同一指纹（哈希的是语义，不是字面顺序）
+  const reordered = ROWS.map((row) => ({
+    ...row,
+    fields: Object.fromEntries(Object.entries(row.fields).reverse()),
+  }));
+  assert.equal(
+    buildAnalysisSourceHash({ ...FACTS, rows: reordered }),
+    buildAnalysisSourceHash(FACTS),
+  );
+});
+
+test("sourceHash：任一关键事实变化 → hash 变化", () => {
+  const base = buildAnalysisSourceHash(FACTS);
+  const variants: [string, Parameters<typeof buildAnalysisSourceHash>[0]][] = [
+    ["核查日", { ...FACTS, checkDate: "2026-09-18" }],
+    ["核查网站", { ...FACTS, siteName: "其他站点" }],
+    ["行序", { ...FACTS, rows: [...ROWS].reverse() }],
+    ["行数", { ...FACTS, rows: ROWS.slice(0, 1) }],
+    ["原始序号", { ...FACTS, rows: [{ ...ROWS[0], index: 99 }, ROWS[1]] }],
+    [
+      "公示类型",
+      {
+        ...FACTS,
+        rows: [{ ...ROWS[0], publicTypes: "失信被执行人" }, ROWS[1]],
+      },
+    ],
+    [
+      "备注",
+      { ...FACTS, rows: [{ ...ROWS[0], remarks: "同案号另有记录" }, ROWS[1]] },
+    ],
+    [
+      "证据文件",
+      { ...FACTS, rows: [{ ...ROWS[0], evidenceFile: "其他.pdf" }, ROWS[1]] },
+    ],
+    [
+      "字段值",
+      {
+        ...FACTS,
+        rows: [
+          { ...ROWS[0], fields: { ...ROWS[0].fields, 执行标的: "999" } },
+          ROWS[1],
+        ],
+      },
+    ],
+    [
+      "字段 null → 有值",
+      {
+        ...FACTS,
+        rows: [
+          {
+            ...ROWS[0],
+            fields: { ...ROWS[0].fields, 生效法律文书确定的义务: "义务内容" },
+          },
+          ROWS[1],
+        ],
+      },
+    ],
+  ];
+  for (const [label, facts] of variants)
+    assert.notEqual(
+      base,
+      buildAnalysisSourceHash(facts),
+      `事实变化必须改变指纹：${label}`,
+    );
+});
+
+test("sourceHash：固定格式，且版本参与哈希（换算法即令旧草稿 stale）", () => {
+  const hash = buildAnalysisSourceHash(FACTS);
+  assert.match(hash, /^[0-9a-f]{64}$/);
+  assert.ok(ANALYSIS_SOURCE_HASH_VERSION.length > 0);
+});
+
 // ── C. 标题口径：UI 与服务端同源显示「重点关注事项」──────────────────────
 
 test("regression C：UI 中文标题显示「重点关注事项」，字段名仍是 keyRisks", () => {
@@ -739,7 +961,16 @@ test("regression C：UI 中文标题显示「重点关注事项」，字段名�
 
 // ── 4. 调用面：鉴权、无客户端输入、无密钥泄漏 ──────────────────────────────
 
-test("analysis API 走用户 JWT + RLS，且不接受客户端提交的事实或提示词", async () => {
+/** 取出某个导出 handler 的源码段（从 `export async function X` 到下一个导出/文件尾）。 */
+function handlerSource(source: string, name: string): string {
+  const start = source.indexOf(`export async function ${name}(`);
+  assert.ok(start >= 0, `route 必须导出 ${name} handler`);
+  const rest = source.slice(start + 1);
+  const next = rest.search(/^export (async )?function /m);
+  return next >= 0 ? rest.slice(0, next) : rest;
+}
+
+test("analysis API 走用户 JWT + RLS，POST 不接受客户端提交的事实或提示词", async () => {
   const [route, client] = await Promise.all([
     readFile(
       new URL(
@@ -762,13 +993,65 @@ test("analysis API 走用户 JWT + RLS，且不接受客户端提交的事实或
   assert.match(route, /assertAnalysisDraftInScope\(/);
   // 输入最小化：route 不得把项目名传进 prompt
   assert.doesNotMatch(route, /projectName:\s*facts\.projectName/);
-  assert.doesNotMatch(route, /buildAnalysisPrompt\(\{[\s\S]*?projectName/);
-  assert.doesNotMatch(route, /request\.json\(\)|request\.text\(\)/);
+  assert.doesNotMatch(
+    handlerSource(route, "POST"),
+    /buildAnalysisPrompt\(\{[\s\S]*?projectName/,
+  );
+  // 生成路径（POST）的输入完全由服务端产生：它**不读任何请求体**，
+  // 因此不存在「客户端提交 facts / 提示词」的注入面。
+  assert.doesNotMatch(
+    handlerSource(route, "POST"),
+    /request\.json\(\)|request\.text\(\)/,
+  );
   assert.doesNotMatch(`${route}\n${client}`, /service[_-]?role/i);
   assert.doesNotMatch(`${route}\n${client}`, /getPublicUrl|createSignedUrl/);
   // API key 只能来自服务端环境变量：公开前缀会把密钥打进浏览器 bundle
   assert.doesNotMatch(`${route}\n${client}`, /NEXT_PUBLIC_AI/);
   assert.doesNotMatch(`${route}\n${client}`, /process\.env\.NEXT_PUBLIC_/);
+});
+
+test("analysis API：GET 读草稿 / PUT 走固定 schema / POST 生成后落库", async () => {
+  const route = await readFile(
+    new URL(
+      "../src/app/api/projects/[projectId]/analysis/route.ts",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const post = handlerSource(route, "POST");
+  const get = handlerSource(route, "GET");
+  const put = handlerSource(route, "PUT");
+
+  // 三个方法都必须先鉴权（401 优先）。
+  for (const [name, source] of [
+    ["POST", post],
+    ["GET", get],
+    ["PUT", put],
+  ] as const)
+    assert.match(source, /captureContext\(request\)/, `${name} 必须先鉴权`);
+
+  // GET：只读已保存草稿，且**不**检查 provider 配置（没有 key 也要能看到既有草稿）。
+  assert.match(get, /loadAnalysisDraft\(/);
+  assert.doesNotMatch(get, /requireAnalysisConfig\(\);/);
+  assert.doesNotMatch(get, /loadProjectReportData\(/);
+
+  // POST：两道闸门之后立即落库，指纹由服务端在同一批 facts 上算定。
+  assert.match(post, /createAnalysisDraft\(/);
+  assert.match(post, /buildAnalysisSourceHash\(/);
+
+  // PUT：唯一的客户端输入入口，必须过固定 schema 解析器再写。
+  assert.match(put, /request\.json\(\)/);
+  assert.match(put, /readAnalysisWrite\(/);
+  assert.match(put, /writeAnalysisDraft\(/);
+  // confirm 必须重载当前事实并用同一 helper 计算指纹；客户端请求体仍只有 action + sections。
+  assert.match(put, /write\.action === "confirm"/);
+  assert.match(put, /loadProjectReportData\(/);
+  assert.match(put, /parseProjectReport\(/);
+  assert.match(put, /buildAnalysisSourceHash\(/);
+  assert.doesNotMatch(
+    put,
+    /body\.(checkDate|sourceHash|generatedAt|confirmedAt)/,
+  );
 });
 
 test("早失败：配置检查在鉴权之后、读取任何事实之前（缺 key 不会下载 PDF / 调用 parser）", async () => {

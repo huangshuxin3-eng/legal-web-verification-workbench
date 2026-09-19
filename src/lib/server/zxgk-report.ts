@@ -19,6 +19,8 @@
  *   2. 不生成 Excel 再读 Excel：DB / Storage → CaptureInput → 解析器 → 报告模型，
  *      Excel 与 DOCX 是并列输出能力，共用同一个解析器。
  *   3. 不持久化报告产物（不新增 report / artifact 表）：点击即生成，HTTP 下载。
+ *      AI 分析草稿存在 `projects.analysis_draft`（Slice 2），是**输入**而非产物；
+ *      报告本身仍然不落库。
  *   4. 不复制解析器 / 报告模型 / 版式规则：只调用 `scripts/` 下已验收的纯逻辑。
  *   5. PDF 下载与解析**有界并发**（`REPORT_CAPTURE_CONCURRENCY`）：只并发 3 份，
  *      不是把几十份一次性打满；顺序、错误语义与产物都与串行实现一致。
@@ -40,8 +42,17 @@ import {
   checkDateLabel,
   isReportTask,
   reportFileName,
+  REPORT_SOURCE_NAME,
   shanghaiDay,
 } from "../report-names.ts";
+import {
+  ANALYSIS_SECTION_KEYS,
+  ANALYSIS_SECTION_TITLES,
+  type AnalysisDraft,
+  type AnalysisDraftRecord,
+} from "../analysis-names.ts";
+import { resolveConfirmedAnalysis } from "./analysis-draft.ts";
+import { buildAnalysisSourceHash } from "./ai-analysis.ts";
 import { getProjectTasks } from "../task-repository.ts";
 import {
   classifyCapture,
@@ -53,6 +64,7 @@ import {
 import {
   buildReportModel,
   renderReportDocx,
+  type ReportAnalysisSection,
 } from "../../../scripts/zxgk-report-docx.ts";
 
 // ── 错误语义（人工确认口径）──────────────────────────────────────────────
@@ -264,14 +276,31 @@ export type ZxgkReportDocument = {
 };
 
 /**
+ * 四段正文 → DOCX 章节（顺序即 `ANALYSIS_SECTION_KEYS`，标题取自唯一口径
+ * `ANALYSIS_SECTION_TITLES`）。渲染层因此不需要复制任何标题文案。
+ */
+export function analysisSections(
+  draft: AnalysisDraft,
+): ReportAnalysisSection[] {
+  return ANALYSIS_SECTION_KEYS.map((key) => ({
+    title: ANALYSIS_SECTION_TITLES[key],
+    text: draft[key],
+  }));
+}
+
+/**
  * ParseResult → 报告模型 → `.docx`。
  * 标题使用**项目名称**；不校验项目名称与查询对象是否一致。
+ *
+ * `analysis` 只在**已人工确认**时才传：一旦传入，报告会多出「核查分析」章节并顺延
+ * 后续章节序号；不传则输出与既有版本逐字一致。
  */
 export async function renderZxgkReportDocx(options: {
   projectName: string;
   result: ParseResult;
   checkDate: string;
   skippedNonPdf?: number;
+  analysis?: readonly ReportAnalysisSection[] | null;
 }): Promise<ZxgkReportDocument> {
   if (options.result.problems.length)
     throw new CaptureOperationError(
@@ -285,6 +314,7 @@ export async function renderZxgkReportDocx(options: {
     targetName: options.projectName,
     checkDate: checkDateLabel(options.checkDate),
     draft: REPORT_DRAFT,
+    analysis: options.analysis ?? null,
   });
   const buffer = await Packer.toBuffer(renderReportDocx(model));
   return {
@@ -414,16 +444,42 @@ export async function parseProjectReport(
   };
 }
 
-/** 完整流程：选择留痕 → 有界并发下载 / 读 PDF → 解析 → 渲染。 */
+/**
+ * 完整流程：选择留痕 → 有界并发下载 / 读 PDF → 解析 →（已确认分析门禁）→ 渲染。
+ *
+ * AI 分析的三条口径（Slice 2）：
+ *   1. 没有草稿、或草稿未确认（`confirmedAt = null`）→ 不传 analysis：报告与既有
+ *      非 AI 报告**逐字一致**，既有语义不变（未确认分析继续可以生成报告）；
+ *   2. 已确认，且 `sourceHash` 等于**用本次刚解析出来的事实现算**的指纹 → 写入 AI 章节；
+ *   3. 已确认但指纹不同 → 409：不允许旧 AI 分析静默进入新报告。
+ *
+ * 指纹比对只能在**解析之后**做 —— 没有事实就没有指纹，也就无从判断是否 stale。
+ * 因此 stale 检测不早于 PDF 解析，但不晚于任何渲染。
+ */
 export async function generateZxgkReportDocx(
-  options: ProjectReportSource,
+  options: ProjectReportSource & {
+    /**
+     * 已保存的分析草稿（由 route 读出并过形状校验）；没有草稿即 null。
+     * 传 null 与不传等价，都表示「这次报告不带 AI 章节」。
+     */
+    analysisDraft?: AnalysisDraftRecord | null;
+  },
 ): Promise<ZxgkReportDocument> {
   const facts = await parseProjectReport(options);
+  const confirmed = resolveConfirmedAnalysis({
+    record: options.analysisDraft ?? null,
+    currentHash: buildAnalysisSourceHash({
+      checkDate: facts.checkDate,
+      siteName: REPORT_SOURCE_NAME,
+      rows: facts.result.rows,
+    }),
+  });
   return renderZxgkReportDocx({
     projectName: facts.projectName,
     result: facts.result,
     checkDate: facts.checkDate,
     skippedNonPdf: facts.skippedNonPdf,
+    analysis: confirmed ? analysisSections(confirmed) : null,
   });
 }
 

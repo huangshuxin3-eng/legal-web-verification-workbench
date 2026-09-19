@@ -1,5 +1,6 @@
 /**
- * AI 分析草稿的**提示词构造**、**输出结构校验**与**输出护栏**（Slice 1 / 1.1 / 1.2）。
+ * AI 分析草稿的**提示词构造**、**输出结构校验**、**输出护栏**与**事实指纹**
+ * （Slice 1 / 1.1 / 1.2 / 2）。
  *
  * 本文件是纯函数层：不发网络请求、不读 PDF、不连 DB、不写磁盘。
  *
@@ -19,8 +20,12 @@
  *      `buildAnalysisSummary`），模型只许引用、不许自己数。第二次真实 E2E 出现过
  *      LLM 数错（真实为 13/9/6 合计 28，模型输出「涉及失信 22 / 其中终本 16」），
  *      根因就是让模型自己做了 aggregation。**不解释、只引用**是这里唯一的修法。
+ *   7. Slice 2 —— **事实指纹**（`buildAnalysisSourceHash`）与 **keyRecords 可追溯性**：
+ *      已确认的草稿只有在指纹仍等于当下事实时才允许进入 DOCX；`keyRecords` 必须引用
+ *      原始 `row.index`，不得自行重新编号（第三次真实 E2E 观察到的 1–26 重编号问题）。
  */
 
+import { createHash } from "node:crypto";
 import type { DetailRow } from "../../../scripts/zxgk-execution-parse.ts";
 import {
   countDuplicateCaseNo,
@@ -137,6 +142,65 @@ function serializeSummary(summary: AnalysisSummary): Record<string, unknown> {
   };
 }
 
+// ── B. 事实指纹（Slice 2）────────────────────────────────────────────────
+//
+// 用途**只有一个**：stale detection —— 判断「已确认的草稿」是否仍对应现在的事实。
+// 明确**不是**安全用途：没有盐、没有密钥、不是密码学承诺，任何人都能重算。
+//
+// 必须满足的三条（人工口径）：
+//   ① rows 内容相同 → hash 相同；
+//   ② rows 内容有任何关键变化 → hash 变化；
+//   ③ 不受 Promise 完成顺序影响。
+//
+// ③ 由「只喂**已按 selection 顺序排定**的 rows、不喂任何异步中间态」保证：
+//    有界并发只改变谁先跑完，`parseProjectReport` 保证行序与并发无关
+//    （见 `tests/zxgk-report-flow.test.ts` 的「完成顺序 3→1→2 不改变输出顺序」）。
+
+/** 指纹算法版本：参与哈希，换算法/换口径时递增，旧草稿自然变成 stale。 */
+export const ANALYSIS_SOURCE_HASH_VERSION = "v1";
+
+/**
+ * 事实的**规范形式**：字段名排序 + 固定键序；**行序保持不变**（行序本身是事实，
+ * 主表序号就是它）。排序只消除「对象键插入顺序」这种与事实无关的差异。
+ */
+function canonicalFacts(facts: {
+  checkDate: string;
+  siteName: string;
+  rows: readonly DetailRow[];
+}): string {
+  return JSON.stringify({
+    checkDate: facts.checkDate,
+    siteName: facts.siteName,
+    rows: facts.rows.map((row) => ({
+      index: row.index,
+      publicTypes: row.publicTypes,
+      remarks: row.remarks,
+      evidenceFile: row.evidenceFile,
+      fields: Object.entries(row.fields ?? {}).sort(([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0,
+      ),
+    })),
+  });
+}
+
+/**
+ * 结构化事实 → 确定性指纹（sha256 十六进制）。
+ *
+ * 不把 summary 计入：summary 是 rows 的纯函数（`buildAnalysisSummary`），
+ * 计入只会让「两处各算一份」有机会漂移，不会增加任何判别力。
+ */
+export function buildAnalysisSourceHash(facts: {
+  checkDate: string;
+  siteName: string;
+  rows: readonly DetailRow[];
+}): string {
+  return createHash("sha256")
+    .update(ANALYSIS_SOURCE_HASH_VERSION)
+    .update("\n")
+    .update(canonicalFacts(facts))
+    .digest("hex");
+}
+
 export type AnalysisPrompt = {
   system: string;
   user: string;
@@ -163,13 +227,14 @@ export const ANALYSIS_SYSTEM_PROMPT = `你正在生成一份尽调核查的「AI
 9. 所有数量（记录总数、各类别数量、按公示类型组合的数量、同案号重复组数）**只能**引用「系统已计算统计」中给出的数值，逐字照抄，不得自行统计、重新清点、改写、换算或估算任何数量。若你对明细清单的理解与系统统计不一致，一律以**系统统计**为准，不得写出与之冲突的数字。
 10. 「结构化事实清单」**就是全部记录**，不存在清单之外的记录。禁止假设或暗示清单不完整：不得出现「其他记录」「未展开记录」「未列示记录」「未纳入记录」「遗漏记录」这类说法，也不得据此建议补充核查根本不存在的记录。
 11. 字段空白是公示口径的正常结果，**不是**数据缺失，不得建议人工核实其成因：公示类型不含「终本案件」的记录，「终本日期」「未履行金额」本就不公示、为空；公示类型不含「被执行人」「终本案件」的记录，「执行标的」本就不公示、为空。禁止输出「建议确认某字段为何为空」「是否为空的字段是否因公示类型不同」这类建议；这类空白不构成任何疑点或待核事项。
+12. 「keyRecords」只挑选**真正值得重点关注**的少量记录，最多 8 条，**不要求**覆盖全部记录。每条必须以该记录在明细清单中的**原始序号**开头，形如「原始序号9｜（2023）辽01执1682号｜要点」，其中数字必须是清单里该条记录「序号」字段的**原值**。禁止另行从 1 开始重新编号，禁止使用「1、」「2、」「1.」这类自拟序号；引用清单里不存在的序号会导致本次分析整体作废。
 
 ## 输出格式
 只输出一个 JSON 对象，不要输出 JSON 之外的任何文字，不要使用 Markdown 代码块。恰好包含以下四个字段，值均为字符串（可用 \\n 分段，但不要使用表格或列表符号）：
 
 - "overview"：核查结果概览 —— 核查范围、记录总数、公示类型构成等事实性汇总；其中的数量一律取自「系统已计算统计」。
 - "keyRisks"：重点关注事项 —— 依据清单中值得关注的情形（如终本、失信、执行标的大小、同案号多笔记录等）。没有则写「未发现需特别提示的事项」。
-- "keyRecords"：重点记录 —— 指出值得重点关注的具体记录，用序号 + 案号（或证据文件名）定位。没有则写「无」。
+- "keyRecords"：重点记录 —— 从清单中挑选最多 8 条真正值得重点关注的记录，每条写成「原始序号N｜案号（或证据文件名）｜要点」一行，N 必须是该记录在清单中的原始「序号」。没有则写「无」。
 - "followUps"：建议进一步核实事项 —— 建议人工进一步核实的方向，不得写成法律意见。`;
 
 /**
@@ -254,29 +319,36 @@ export function parseAnalysisResponse(raw: unknown): AnalysisDraft {
   return draft;
 }
 
-// ── 输出护栏（Slice 1.1 / 1.2）────────────────────────────────────────────
+// ── 输出护栏（Slice 1.1 / 1.2 / 2）─────────────────────────────────────────
 //
 // 护栏 = 模型输出之后的**程序化机械检查**，不做复杂 NLP、不调用第二个模型、不自动
 // retry（避免重复计费）。命中即**整次 fail closed**：不展示任何片段，不返回半成品。
 //
-// 为什么需要它：提示词是软约束，真实 E2E 已出现过四类越界输出。护栏是硬兜底，
+// 为什么需要它：提示词是软约束，真实 E2E 已出现过五类越界输出。护栏是硬兜底，
 // 只覆盖禁令的**明显**形态：
 //   P. project / query 关系判断（把项目名与检索对象的差异写成风险 / 待核事项）；
 //   D. 日期逻辑判断（晚于 / 早于 / 接近核查日、时间异常等）。
 //   R. 假设清单外还有记录（其他 / 未展开 / 未列示 / 遗漏记录）。
 //   E. 把「字段空白」当疑点，建议人工核实成因（该空白已由公示口径解释）。
+//   K. keyRecords 不可追溯（超过 8 条 / 引用不存在的序号 / 自行从 1 重新编号）。
 //
 // **刻意不做**数字一致性解析（Slice 1.2 明确取舍）：从自由文本里可靠地抽取「N 条终本」
 // 并判定是否与 summary 冲突，需要区分金额、日期、案号里的数字，机械规则误杀率高。
 // 数量正确性改由「确定性 summary + 提示词第 9 条（照抄不重算）」保证 —— 那是可靠层，
 // 护栏不在这里假装能做到。
+//
+// keyRecords 的检查同样**只做机械判定**：数「原始序号N」引用的个数、比对序号是否真实
+// 存在于当前 rows、拦行首自拟编号。不做语义理解、不判断「这条是否真的重要」。
 
 /** 护栏规则名（仅供服务端诊断，**不进**任何对外文案）。 */
 export type AnalysisGuardrailRule =
   | "project-name-relation"
   | "date-logic"
   | "phantom-records"
-  | "empty-field-recheck";
+  | "empty-field-recheck"
+  | "key-records-limit"
+  | "key-records-unknown-index"
+  | "key-records-renumbered";
 
 const PROJECT_NAME_SOURCE =
   "(?:项目名称|项目名|项目主体|项目全称|查询项目名称)";
@@ -353,6 +425,55 @@ const EMPTY_FIELD_RECHECK_PATTERNS: readonly RegExp[] = [
   /(?:为空|空白|留空|空缺|缺失)[^。；\n]{0,20}(?:是否因|是否因为|原因|成因)/,
 ];
 
+/**
+ * keyRecords 的可追溯性规则（Slice 2）。
+ *
+ * 真实背景：第三次 E2E 里 keyRecords 把挑出来的 26 条记录**自行编号 1–26**，
+ * 于是「AI 说的第 9 条」在报告主表里找不到对应行 —— 用户无法回到原始记录。
+ * 修法是两头卡：提示词要求写「原始序号N｜…」（第 12 条），护栏机械拒绝越界形态。
+ *
+ * 只做三件机械判定，**不做**语义理解、不判断「这条是否真的重要」：
+ *   1. 「原始序号N」引用超过 `ANALYSIS_KEY_RECORDS_LIMIT` 条 → 拒绝（要求「少量」）；
+ *   2. 任一 N 不在当前 rows 的 `index` 集合里 → 拒绝（不可追溯）；
+ *   3. 行首出现自拟编号（`1、` / `1.` / `1｜` / `1)`）→ 拒绝（即是重新编号形态）。
+ */
+export const ANALYSIS_KEY_RECORDS_LIMIT = 8;
+
+/** 可追溯引用前缀：`原始序号9｜（2023）辽01执1682号｜…`。 */
+export const ANALYSIS_KEY_RECORDS_PREFIX = "原始序号";
+
+const KEY_RECORDS_REFERENCE_PATTERN = /原始序号\s*(\d+)/g;
+/**
+ * 行首裸编号。`\d+` 后面**紧跟**分隔符才算，所以正文里的「2026-01-16 立案」
+ * 与「2 条记录」都不会命中；而 `1、（2026）粤03执1234号` 会命中 —— 正是要拦的形态。
+ */
+const KEY_RECORDS_RENUMBER_PATTERN = /^[ \t]*\d+[ \t]*[、.．｜|)）]/m;
+
+/**
+ * keyRecords 专项护栏：返回命中的规则名，未命中返回 null。
+ *
+ * 单独一个函数（而不是并进 `findAnalysisGuardrailViolation`）是因为它**需要 rows**：
+ * 「序号是否真实存在」必须拿当前事实来判，不能只看文本。
+ */
+export function findKeyRecordsViolation(
+  text: string,
+  rows: readonly DetailRow[],
+): AnalysisGuardrailRule | null {
+  if (!text) return null;
+  const referenced = [...text.matchAll(KEY_RECORDS_REFERENCE_PATTERN)].map(
+    (match) => Number(match[1]),
+  );
+  if (referenced.length > ANALYSIS_KEY_RECORDS_LIMIT)
+    return "key-records-limit";
+  if (referenced.length) {
+    const known = new Set(rows.map((row) => row.index));
+    if (referenced.some((index) => !known.has(index)))
+      return "key-records-unknown-index";
+  }
+  if (KEY_RECORDS_RENUMBER_PATTERN.test(text)) return "key-records-renumbered";
+  return null;
+}
+
 /** 返回命中的护栏规则名；未命中返回 null。纯函数，可独立测试。 */
 export function findAnalysisGuardrailViolation(
   text: string,
@@ -372,6 +493,9 @@ export function findAnalysisGuardrailViolation(
 /**
  * 输出护栏：四段**逐段**做机械检查，任一段命中即整次 fail closed。
  *
+ * `rows` 是必须的：keyRecords 的「序号是否真实存在」只能对着**当前事实**判，
+ * 这也是本函数唯一需要事实的地方 —— 其余规则都只看文本。
+ *
  * 抛 `CaptureOperationError(ANALYSIS_GUARDRAIL_MESSAGE, 502)` —— 文案明确告知
  * 「本次结果整体放弃」，但**不**暴露命中的规则名、提示词或任何输出片段。
  * 不做局部裁剪、不做自动 retry：宁可没有草稿，也不留下越界内容。
@@ -380,10 +504,17 @@ export function findAnalysisGuardrailViolation(
  */
 export function assertAnalysisDraftInScope(
   draft: AnalysisDraft,
+  rows: readonly DetailRow[],
 ): AnalysisDraft {
   for (const key of ANALYSIS_SECTION_KEYS) {
-    if (findAnalysisGuardrailViolation(draft[key]))
-      throw new CaptureOperationError(ANALYSIS_GUARDRAIL_MESSAGE, 502);
+    const text = draft[key];
+    if (findAnalysisGuardrailViolation(text)) throw outOfScope();
+    if (key === "keyRecords" && findKeyRecordsViolation(text, rows))
+      throw outOfScope();
   }
   return draft;
+}
+
+function outOfScope() {
+  return new CaptureOperationError(ANALYSIS_GUARDRAIL_MESSAGE, 502);
 }

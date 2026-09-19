@@ -26,8 +26,21 @@ import {
   classifyCapture,
   parseExecutionTable,
 } from "../scripts/zxgk-execution-parse.ts";
-import { DRAFT_MARK_LINE, TITLE_TAIL } from "../scripts/zxgk-report-docx.ts";
+import {
+  DRAFT_MARK_LINE,
+  REPORT_ANALYSIS_HEADING,
+  REPORT_ANALYSIS_NOTICE,
+  TITLE_TAIL,
+} from "../scripts/zxgk-report-docx.ts";
 import { CaptureOperationError } from "../src/lib/capture-workflow.ts";
+import {
+  ANALYSIS_DRAFT_VERSION,
+  ANALYSIS_SECTION_TITLES,
+  ANALYSIS_STALE_MESSAGE,
+  type AnalysisDraft,
+  type AnalysisDraftRecord,
+} from "../src/lib/analysis-names.ts";
+import { buildAnalysisSourceHash } from "../src/lib/server/ai-analysis.ts";
 import {
   REPORT_MIME_TYPE,
   REPORT_SOURCE_NAME,
@@ -635,7 +648,8 @@ test("Workbench 提供报告入口、coarse check 与防重复提交", async () 
   assert.match(workspace, /isReportTask/);
   assert.match(dialog, /\/api\/projects\/\$\{projectId\}\/report/);
   assert.match(dialog, /if \(lock\.current \|\| !captureCount\) return/);
-  assert.match(dialog, /disabled=\{busy \|\| !captureCount\}/);
+  assert.match(dialog, /disabled=\{busy \|\| !captureCount \|\| dirty\}/);
+  assert.match(dialog, /未保存的文本不会进入报告/);
 });
 
 // ── 事实边界：AI 分析与 DOCX 渲染共用同一份事实 ─────────────────────────
@@ -1101,4 +1115,208 @@ test("全部成功时与串行实现业务等价：document.xml 逐字相同", a
     `并发与串行必须产出同一份 word/document.xml；首个差异在第 ${at} 字符：` +
       `并发「${concurrentXml.slice(at, at + 80)}」 vs 串行「${serialXml.slice(at, at + 80)}」`,
   );
+});
+
+// ── 18. AI 分析集成：只有已确认的分析进报告（Slice 2）─────────────────────
+//
+// 三条口径（人工 LOCK）：
+//   ① 没有草稿 / 草稿未确认 → 报告与既有非 AI 版本**逐字一致**，语义不变；
+//   ② 已确认且指纹等于当下事实 → 写入 AI 章节，内容 = 人工最终保存的版本
+//      （**不**重新调用模型）；
+//   ③ 已确认但指纹不同 → 409：不允许旧 AI 分析静默进入新报告。
+
+const AI_PROJECT = "北京术锐机器人有限公司";
+const AI_COUNT = 7;
+
+const AI_DRAFT: AnalysisDraft = {
+  overview: "本次核查共纳入 7 条记录，均为被执行人公示。",
+  keyRisks: "重点关注执行标的金额较大的记录。",
+  keyRecords: "原始序号3｜（2026）粤03执3号｜被执行人",
+  followUps: "现有核查信息不足以判断，建议人工核对原件。",
+};
+
+function aiRecord(
+  overrides: Partial<AnalysisDraftRecord> = {},
+): AnalysisDraftRecord {
+  return {
+    version: ANALYSIS_DRAFT_VERSION,
+    checkDate: "2026-09-17",
+    sourceHash: "a".repeat(64),
+    generatedAt: "2026-09-19T01:00:00.000Z",
+    updatedAt: "2026-09-19T01:00:00.000Z",
+    confirmedAt: null,
+    sections: AI_DRAFT,
+    ...overrides,
+  };
+}
+
+/** 用同一批合成留痕跑一次完整报告流程（可注入草稿）。 */
+async function runReport(analysisDraft: AnalysisDraftRecord | null) {
+  const loader = observableLoader();
+  const pending = generateZxgkReportDocx({
+    projectName: AI_PROJECT,
+    tasks: [concurrentTask(AI_COUNT)],
+    loadCapture: loader.loadCapture,
+    readPages: pagesFromBytes,
+    analysisDraft,
+  });
+  for (let index = 0; index < AI_COUNT; index += 1) loader.release(index);
+  return await pending;
+}
+
+/** 当前事实的指纹：同一批留痕、同一批纯函数，可指定放行顺序。 */
+async function factsHash(releaseOrder: readonly number[]) {
+  const loader = observableLoader();
+  const pending = parseProjectReport({
+    projectName: AI_PROJECT,
+    tasks: [concurrentTask(AI_COUNT)],
+    loadCapture: loader.loadCapture,
+    readPages: pagesFromBytes,
+  });
+  for (const index of releaseOrder) loader.release(index);
+  const facts = await pending;
+  return buildAnalysisSourceHash({
+    checkDate: facts.checkDate,
+    siteName: REPORT_SOURCE_NAME,
+    rows: facts.result.rows,
+  });
+}
+
+/**
+ * 主表区段（明细标题正文 → 律师提示标题之前），用于断言 AI 章节不影响主表。
+ *
+ * 注意：DOCX 里章节序号与标题文本在**同一个** `<w:t>` 节点内
+ * （`三、执行及失信公开信息明细`），所以两端都必须把序号排除掉，
+ * 否则 AI 章节导致的「二→三 / 三→四」顺延会污染切片末尾，形成假差异。
+ */
+function tableRegion(xml: string) {
+  const start = xml.indexOf("执行及失信公开信息明细");
+  const end = xml.search(/[一二三四五六七八九十]+、律师提示/);
+  assert.ok(start >= 0 && end > start, "应能定位主表区段");
+  return xml.slice(start, end);
+}
+
+/** 附件区段（「律师提示」四字之后全部），含补充块与证据文件名顺序。 */
+function appendixRegion(xml: string) {
+  const start = xml.indexOf("律师提示");
+  assert.ok(start >= 0, "应能定位律师提示");
+  return xml.slice(start);
+}
+
+/** 两个片段的「首个差异」描述，用于长 XML 比较失败时给出可读线索。 */
+function firstDiff(actual: string, expected: string) {
+  let at = 0;
+  while (at < actual.length && actual[at] === expected[at]) at += 1;
+  return (
+    `首个差异在第 ${at} 字符（actual ${actual.length} / expected ${expected.length}）：` +
+    `actual「${actual.slice(Math.max(0, at - 20), at + 60)}」 ` +
+    `expected「${expected.slice(Math.max(0, at - 20), at + 60)}」`
+  );
+}
+
+test("AI 分析：事实指纹不受留痕完成顺序影响（有界并发不改变指纹）", async () => {
+  const forward = await factsHash([0, 1, 2, 3, 4, 5, 6]);
+  const backward = await factsHash([6, 5, 4, 3, 2, 1, 0]);
+  assert.match(forward, /^[0-9a-f]{64}$/);
+  assert.equal(forward, backward, "完成顺序不得改变指纹");
+});
+
+test("AI 分析：没有草稿 / 草稿未确认 → 报告与既有非 AI 版本逐字一致", async () => {
+  const [none, unconfirmed] = await Promise.all([
+    runReport(null),
+    // 指纹正确但 confirmedAt = null：仍然不得进入报告
+    runReport(aiRecord({ sourceHash: await factsHash([0, 1, 2, 3, 4, 5, 6]) })),
+  ]);
+  const [noneXml, unconfirmedXml] = [
+    await documentXml(none.buffer),
+    await documentXml(unconfirmed.buffer),
+  ];
+  assert.equal(unconfirmedXml, noneXml, "未确认的分析不得写入报告");
+  assert.ok(!noneXml.includes(REPORT_ANALYSIS_HEADING));
+  assert.ok(!noneXml.includes(REPORT_ANALYSIS_NOTICE));
+  // 章节序号回到既有形态
+  assert.ok(noneXml.includes("二、执行及失信公开信息明细"));
+  assert.ok(noneXml.includes("三、律师提示"));
+  assert.equal(none.records, AI_COUNT);
+});
+
+test("AI 分析：已确认且指纹相同 → 写入 AI 章节，四段与保存版本一致", async () => {
+  const hash = await factsHash([0, 1, 2, 3, 4, 5, 6]);
+  const report = await runReport(
+    aiRecord({ sourceHash: hash, confirmedAt: "2026-09-19T02:00:00.000Z" }),
+  );
+  const xml = await documentXml(report.buffer);
+
+  assert.ok(xml.includes(REPORT_ANALYSIS_HEADING), "应出现核查分析章节");
+  assert.ok(xml.includes(REPORT_ANALYSIS_NOTICE), "应带固定说明（非法律意见）");
+  // 四小节标题与正文 = 数据库里保存的最终版本（不重新调模型）
+  for (const [key, title] of Object.entries(ANALYSIS_SECTION_TITLES)) {
+    assert.ok(xml.includes(title), `缺少小节标题：${title}`);
+    assert.ok(
+      xml.includes(AI_DRAFT[key as keyof AnalysisDraft]),
+      `缺少已确认正文：${key}`,
+    );
+  }
+  // 序号顺延
+  assert.ok(xml.includes("三、执行及失信公开信息明细"));
+  assert.ok(xml.includes("四、律师提示"));
+  assert.ok(!xml.includes("二、执行及失信公开信息明细"));
+});
+
+test("AI 分析：主表行序与证据索引顺序不变，三节方向不回归", async () => {
+  const hash = await factsHash([0, 1, 2, 3, 4, 5, 6]);
+  const [withAi, withoutAi] = await Promise.all([
+    runReport(
+      aiRecord({ sourceHash: hash, confirmedAt: "2026-09-19T02:00:00.000Z" }),
+    ),
+    runReport(null),
+  ]);
+  const [aiXml, baseXml] = [
+    await documentXml(withAi.buffer),
+    await documentXml(withoutAi.buffer),
+  ];
+
+  // 主表区段（含 11 列表格与行序）逐字相同
+  assert.equal(
+    tableRegion(aiXml),
+    tableRegion(baseXml),
+    firstDiff(tableRegion(aiXml), tableRegion(baseXml)),
+  );
+  // 附件区段（补充块与证据文件名顺序）逐字相同 —— 序号前缀在切片之前，故不受顺延影响
+  assert.equal(
+    appendixRegion(aiXml),
+    appendixRegion(baseXml),
+    firstDiff(appendixRegion(aiXml), appendixRegion(baseXml)),
+  );
+  assert.equal(withAi.records, withoutAi.records);
+  assert.equal(withAi.excludedCaptures, withoutAi.excludedCaptures);
+
+  // 页面方向仍为 纵向 / 横向 / 纵向：3 个节属性、其中恰好 1 个横向
+  for (const xml of [aiXml, baseXml]) {
+    assert.equal((xml.match(/<w:pgSz/g) ?? []).length, 3);
+    assert.equal((xml.match(/w:orient="landscape"/g) ?? []).length, 1);
+  }
+});
+
+test("AI 分析：已确认但指纹不同 → 409，旧分析不得静默进入新报告", async () => {
+  const hash = await factsHash([0, 1, 2, 3, 4, 5, 6]);
+  const stale = aiRecord({
+    sourceHash: "b".repeat(64),
+    confirmedAt: "2026-09-19T02:00:00.000Z",
+  });
+  assert.notEqual(stale.sourceHash, hash);
+  await assert.rejects(
+    () => runReport(stale),
+    (error: unknown) =>
+      error instanceof CaptureOperationError &&
+      error.status === 409 &&
+      error.message === ANALYSIS_STALE_MESSAGE,
+  );
+});
+
+test("AI 分析：未确认的草稿即使指纹不同也不阻断报告（它本来就不进报告）", async () => {
+  const report = await runReport(aiRecord({ sourceHash: "c".repeat(64) }));
+  assert.equal(report.records, AI_COUNT);
+  const xml = await documentXml(report.buffer);
+  assert.ok(!xml.includes(REPORT_ANALYSIS_HEADING));
 });

@@ -24,9 +24,13 @@
  *   5. 固定模板文字只陈述数据已确定的事实；不作风险评分、不作法律结论、不写「AI/系统认为」。
  *
  * 版式（显式写入代码，不依赖 Word 默认值）：
- *   第 1 节 纵向 A4：报告标题 + 开发验证提示 + 一、核查说明
- *   第 2 节 横向 A4：二、执行及失信公开信息明细 +（一）表 1 表题 + 11 列表格本体
- *   第 3 节 纵向 A4：三、律师提示 + 附：表 1 补充信息及证据索引
+ *   第 1 节 纵向 A4：报告标题 + 开发验证提示 + 一、核查说明（+ 二、核查分析，仅已确认时）
+ *   第 2 节 横向 A4：三/二、执行及失信公开信息明细 +（一）表 1 表题 + 11 列表格本体
+ *   第 3 节 纵向 A4：四/三、律师提示 + 附：表 1 补充信息及证据索引
+ *
+ * AI 分析章节（Slice 2）：**只有** `meta.analysis` 非空（= 人工已确认）时才出现，
+ * 位置固定在第 1 节内「核查说明」之后；出现时后续一级标题序号整体顺延一位。
+ * 不带 AI 章节时输出与既有版本**逐字一致**（由 tests 的 baseline 断言固化）。
  *
  * 以下是**纯排版**规则（只决定换行/分页位置，不增删任何事实内容）：
  *   1. 主表数据行 `cantSplit`（一条记录不跨页拆分），表头行保留 `tableHeader` 跨页重复；
@@ -80,6 +84,38 @@ export const TITLE_SIZE_HALF_PT = 32;
 /** 标题固定后缀（核查事项）。标题 = 《核查对象 + 本后缀》。 */
 export const TITLE_TAIL = "执行及失信公开信息核查报告";
 
+// ── 一级章节序号与 AI 分析章节（Slice 2）──────────────────────────────────
+
+/**
+ * 一级章节序号。带 AI 分析章节时，其后的「明细」「律师提示」整体顺延一位
+ * （二 → 三、三 → 四）；不带时与既有报告**逐字一致**。
+ * 二级标题的「（一）（二）…」复用同一组序号，不再另建一份。
+ */
+export const SECTION_ORDINALS = ["一", "二", "三", "四"] as const;
+
+/** AI 分析章节标题（V1 固定口径：AI 辅助 + 经人工确认）。 */
+export const REPORT_ANALYSIS_HEADING = "核查分析（AI辅助，经人工确认）";
+
+/**
+ * AI 分析章节开头的固定说明（产品口径，逐字固定）。
+ *
+ * 「经人工确认」不是修辞：本章节**只**在 `confirmedAt != null` 时才会被写入，
+ * 未确认的分析不会出现在报告里（由 `resolveConfirmedAnalysis` 与 409 保证）。
+ */
+export const REPORT_ANALYSIS_NOTICE =
+  "本节内容由人工智能基于本报告结构化核查事实辅助生成，并经人工确认；其内容不构成正式法律意见。";
+
+/**
+ * 已确认的分析小节（顺序即展示顺序）。
+ *
+ * `title` 由调用方取自唯一口径 `ANALYSIS_SECTION_TITLES` —— 渲染层不复制标题文案，
+ * 避免「报告里的标题」与「界面上的标题」漂移。
+ */
+export type ReportAnalysisSection = {
+  title: string;
+  text: string;
+};
+
 export type ReportMeta = {
   /** 核查对象（被查询主体名称）。 */
   targetName: string;
@@ -91,6 +127,11 @@ export type ReportMeta = {
   siteUrl?: string;
   /** 是否开发验证草稿；正式产品在核查完成后置 false。默认 true。 */
   draft?: boolean;
+  /**
+   * 已人工确认的 AI 分析四段。缺省 / 空数组 = 不带 AI 章节（既有行为，逐字不变）。
+   * 未确认的分析**不得**传进来 —— 是否已确认由服务端的 `resolveConfirmedAnalysis` 判定。
+   */
+  analysis?: readonly ReportAnalysisSection[] | null;
 };
 
 // ── 报告内容模型 ──────────────────────────────────────────────────────────
@@ -151,11 +192,11 @@ export type ReportModel = {
   title: string;
   /** 首页的醒目提示；正式报告为空串。 */
   notice: string;
-  /** 第 1 节（纵向）：标题 + 开发验证提示 + 一、核查说明。 */
+  /** 第 1 节（纵向）：标题 + 开发验证提示 + 一、核查说明（+ 二、核查分析，仅已确认时）。 */
   preamble: ReportBlock[];
-  /** 第 2 节（横向）：二、明细标题 +（一）表 1 表题 + 表格本体。 */
+  /** 第 2 节（横向）：明细标题 +（一）表 1 表题 + 表格本体。 */
   landscape: ReportBlock[];
-  /** 第 3 节（纵向）：三、律师提示 + 附：表 1 补充信息及证据索引。 */
+  /** 第 3 节（纵向）：律师提示 + 附：表 1 补充信息及证据索引。 */
   appendix: ReportBlock[];
 };
 
@@ -395,6 +436,17 @@ function body(text: string, options: ParagraphOptions = {}): ReportParagraph {
   return paragraph([{ text }], options);
 }
 
+/**
+ * 已确认的分析正文按行拆段：模型/人工都可能用换行分段，
+ * 空行丢弃，不产生空段落（空段落会在 Word 里留下多余空行）。
+ */
+function sectionLines(text: string): string[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 /** 一级标题（14pt 黑体）。 */
 function heading1(
   text: string,
@@ -438,6 +490,11 @@ export function buildReportModel(
   const siteUrl = meta.siteUrl ?? DEFAULT_SITE_URL;
   const rows = result.rows;
   const total = rows.length;
+  // AI 分析章节只在已确认时存在（调用方保证）；空数组与缺省等价，都按「没有」处理。
+  const analysis = meta.analysis?.length ? meta.analysis : null;
+  // 序号顺延：不带 AI = 明细「二」/提示「三」；带 AI = 明细「三」/提示「四」。
+  const detailOrdinal = SECTION_ORDINALS[analysis ? 2 : 1];
+  const hintOrdinal = SECTION_ORDINALS[analysis ? 3 : 2];
 
   const groups = groupByPublicTypes(rows);
   const duplicate = countDuplicateCaseNo(rows);
@@ -554,9 +611,23 @@ export function buildReportModel(
     preamble.push(body(`${position + 1}. ${text}`));
   });
 
-  // ── 第 2 节：「二、」明细标题 + 表 1 表题 + 表格本体（同一横向节）──────
+  // ── AI 分析章节（仅人工已确认时；仍属第 1 纵向节）─────────────────────
+  if (analysis) {
+    preamble.push(
+      heading1(`${SECTION_ORDINALS[1]}、${REPORT_ANALYSIS_HEADING}`),
+    );
+    preamble.push(body(REPORT_ANALYSIS_NOTICE));
+    analysis.forEach((section, position) => {
+      preamble.push(
+        heading2(`（${SECTION_ORDINALS[position]}）${section.title}`),
+      );
+      for (const line of sectionLines(section.text)) preamble.push(body(line));
+    });
+  }
+
+  // ── 第 2 节：「二/三、」明细标题 + 表 1 表题 + 表格本体（同一横向节）──
   const landscape: ReportBlock[] = [
-    heading1("二、执行及失信公开信息明细"),
+    heading1(`${detailOrdinal}、执行及失信公开信息明细`),
     heading2("（一）表 1　执行及失信公开信息汇总表"),
     {
       kind: "table",
@@ -569,7 +640,7 @@ export function buildReportModel(
   ];
 
   // ── 第 3 节：律师提示 + 附：表 1 补充信息及证据索引 ───────────────────
-  const appendix: ReportBlock[] = [heading1("三、律师提示")];
+  const appendix: ReportBlock[] = [heading1(`${hintOrdinal}、律师提示`)];
   const hints: string[] = [
     `本报告所载信息系基于${siteName}于 ${meta.checkDate}公示的内容整理而成。` +
       `该等公示信息系动态信息，可能因被执行人履行义务、执行程序推进、案件撤销或信息更正等` +
