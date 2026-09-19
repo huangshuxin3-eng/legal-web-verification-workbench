@@ -16,7 +16,8 @@
  *      Excel 与 DOCX 是并列输出能力，共用同一个解析器。
  *   3. 不持久化报告产物（不新增 report / artifact 表）：点击即生成，HTTP 下载。
  *   4. 不复制解析器 / 报告模型 / 版式规则：只调用 `scripts/` 下已验收的纯逻辑。
- *   5. PDF 下载与解析**顺序处理**：不并发几十份 PDF，避免一次性打满内存与连接。
+ *   5. PDF 下载与解析**有界并发**（`REPORT_CAPTURE_CONCURRENCY`）：只并发 3 份，
+ *      不是把几十份一次性打满；顺序、错误语义与产物都与串行实现一致。
  *
  * 关于 canonical Query：规则是仓库既有 invariant（见 `NONLIT_WORKBENCH_CONTEXT.md`
  * 「canonical Query 选择规则」），扩展侧实现在 `extension/src/lib/query-identity.mjs`。
@@ -293,23 +294,83 @@ export async function renderZxgkReportDocx(options: {
   };
 }
 
-/** 完整流程：选择留痕 → 顺序下载 / 读 PDF → 解析 → 渲染。 */
+// ── 有界并发（本轮唯一的性能改动）────────────────────────────────────────
+
+/**
+ * 「下载 + 读 PDF」同时进行的份数。
+ *
+ * 实测依据（2026-09-19 生产 profiling，31 份真实留痕 + diagnostics_channel）：
+ * 串行 route ≈ 35.4s，其中 31 次 Storage 请求占 31.1s，而 body 合计只有 2.67s
+ * → 瓶颈是跨境 round-trip（TTFB 中位 872ms），不是带宽、parser 或 renderer。
+ * 3 是收益拐点：按真实逐份数据推演，2→3 省 5.2s，3→4 只再省 2.2s。
+ */
+export const REPORT_CAPTURE_CONCURRENCY = 3;
+
+/**
+ * 有界并发映射：任意时刻活跃 worker 不超过 `concurrency` 个，结果**按输入下标**回填。
+ *
+ * 失败语义刻意做成确定性的：某一份失败**不会**提前中断其它 worker，
+ * 而是等全部 worker 收工后，按**输入顺序**抛出第一份失败。
+ * 这样「谁先 reject」不会改变可观察结果 —— 与串行实现逐字一致。
+ */
+export async function mapWithConcurrency<Item, Result>(
+  items: readonly Item[],
+  concurrency: number,
+  worker: (item: Item, index: number) => Promise<Result>,
+): Promise<Result[]> {
+  const results = new Array<Result>(items.length);
+  const failures = new Map<number, unknown>();
+  let cursor = 0;
+  const workers = Array.from(
+    { length: Math.max(1, Math.min(concurrency, items.length)) },
+    async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        try {
+          results[index] = await worker(items[index], index);
+        } catch (error) {
+          failures.set(index, error);
+        }
+      }
+    },
+  );
+  await Promise.all(workers);
+  for (let index = 0; index < items.length; index += 1) {
+    if (failures.has(index)) throw failures.get(index);
+  }
+  return results;
+}
+
+/** 完整流程：选择留痕 → 有界并发下载 / 读 PDF → 解析 → 渲染。 */
 export async function generateZxgkReportDocx(options: {
   projectName: string;
   tasks: readonly ZxgkReportTask[];
   loadCapture: (storagePath: string) => Promise<Blob>;
+  /** 仅供测试注入；缺省即真实 `readPages`（与 `loadCapture` 同一注入模式）。 */
+  readPages?: (bytes: Uint8Array) => Promise<TextRun[][]>;
 }): Promise<ZxgkReportDocument> {
   const selection = selectReportCaptures(options.tasks);
+  const readPagesImpl = options.readPages ?? readPages;
 
+  const loaded = await mapWithConcurrency(
+    selection.captures,
+    REPORT_CAPTURE_CONCURRENCY,
+    async (capture) => {
+      const blob = await options.loadCapture(capture.storagePath);
+      return readPagesImpl(new Uint8Array(await blob.arrayBuffer()));
+    },
+  );
+
+  // 顺序只由 selection 决定：并发只改变「谁先跑完」，绝不改变表格行序。
   const inputs: CaptureInput[] = [];
   const detailDays: string[] = [];
-  for (const capture of selection.captures) {
-    const blob = await options.loadCapture(capture.storagePath);
-    const pages = await readPages(new Uint8Array(await blob.arrayBuffer()));
+  loaded.forEach((pages, index) => {
+    const capture = selection.captures[index];
     inputs.push({ fileName: capture.fileName, pages });
     // 核查日只取**详情**留痕：列表页不构成一次案件公示，不参与日期仲裁。
     if (classifyCapture(pages) === "detail") detailDays.push(capture.day);
-  }
+  });
 
   const checkDate = resolveCheckDate(detailDays);
   const result = parseExecutionTable(inputs);

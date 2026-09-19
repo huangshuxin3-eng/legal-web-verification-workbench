@@ -15,8 +15,16 @@ import { test } from "node:test";
 import { inflateRawSync } from "node:zlib";
 import type { Capture } from "../src/lib/database.types.ts";
 import type {
+  CaptureInput,
   DetailRow,
   ParseResult,
+  TextRun,
+} from "../scripts/zxgk-execution-parse.ts";
+import {
+  COMMON_FIELD_LABELS,
+  EXECUTION_AMOUNT_LABEL,
+  classifyCapture,
+  parseExecutionTable,
 } from "../scripts/zxgk-execution-parse.ts";
 import { DRAFT_MARK_LINE, TITLE_TAIL } from "../scripts/zxgk-report-docx.ts";
 import { CaptureOperationError } from "../src/lib/capture-workflow.ts";
@@ -36,9 +44,11 @@ import {
   NO_DETAIL_MESSAGE,
   NO_TASK_MESSAGE,
   PROJECT_MISSING_MESSAGE,
+  REPORT_CAPTURE_CONCURRENCY,
   REPORT_DRAFT,
   STORAGE_READ_MESSAGE,
   generateZxgkReportDocx,
+  mapWithConcurrency,
   normalizeQueryText,
   renderZxgkReportDocx,
   resolveCheckDate,
@@ -625,4 +635,390 @@ test("Workbench 提供报告入口、coarse check 与防重复提交", async () 
   assert.match(dialog, /\/api\/projects\/\$\{projectId\}\/report/);
   assert.match(dialog, /if \(lock\.current \|\| !captureCount\) return/);
   assert.match(dialog, /disabled=\{busy \|\| !captureCount\}/);
+});
+
+// ── 16 / 17. 有界并发：并发度、顺序、失败确定性 ───────────────────────────
+//
+// 测试夹具用**合成几何数据**，不读真实 PDF：把「每页文字段」按实测版面不变量
+// （标签列右边界 <190、值列左边界 194.6、行距 24pt、页脚家具字号 6）拼出来，
+// 交给真实 `classifyCapture` / `parseExecutionTable` / `renderReportDocx`。
+// 这样并发与顺序断言走的仍是产品代码路径，但不需要 Storage、DB 或真实留痕。
+
+const DETAIL_FOOTER = "https://zhzxgk.court.gov.cn/zhzxgk/detail.html";
+
+/** 「被执行人」板块本应公示的全部字段（标签取自 parser，不在测试里另造口径）。 */
+const EXECUTION_FIELDS: readonly (readonly [string, string])[] = [
+  ["案号", "（2026）粤03执0号"],
+  ["被执行人姓名/名称", "恒大集团有限公司"],
+  ["性别", "—"],
+  ["身份证号码/组织机构代码", "9144030008****371X"],
+  ["执行法院", "深圳市南山区人民法院"],
+  ["立案时间", "2026-09-01"],
+  ["执行标的", "1000000"],
+];
+
+/** 合成一页 detail：板块 banner + 字段行（标签/值分列）+ 页脚 detail 标识。 */
+function detailPages(caseNo: number): TextRun[][] {
+  const runs: TextRun[] = [{ str: "被执行人", x: 40, y: 720, h: 13.5 }];
+  let y = 696;
+  for (const [label, value] of EXECUTION_FIELDS) {
+    runs.push({ str: `${label}：`, x: 60, y, h: 10.5 });
+    runs.push({
+      str: label === "案号" ? `（2026）粤03执${caseNo}号` : value,
+      x: 194.6,
+      y,
+      h: 10.5,
+    });
+    y -= 24;
+  }
+  runs.push({ str: DETAIL_FOOTER, x: 419.2, y: 30, h: 6 });
+  return [runs];
+}
+
+/** 假 readPages：从 Blob 字节里取回 capture 下标，返回对应的合成页面。 */
+const pagesFromBytes = async (bytes: Uint8Array) => detailPages(bytes[0]);
+
+/** 让已就绪的微任务全部排空（不依赖定时器，因此没有平台时序差异）。 */
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * 可观测的假 Storage 下载：**完成时机由测试显式放行**，不用 setTimeout ——
+ * 否则完成顺序会随平台定时器粒度漂移，测试就变成脆弱的时序断言。
+ * `release(index)` 表示「这一份可以下完了」；未放行的下载一直挂在等待里。
+ */
+function observableLoader(failure?: (index: number) => unknown) {
+  const state = {
+    active: 0,
+    maxActive: 0,
+    started: [] as number[],
+    completed: [] as number[],
+  };
+  const opened = new Set<number>();
+  const waiters = new Map<number, () => void>();
+  const release = (index: number) => {
+    opened.add(index);
+    waiters.get(index)?.();
+    waiters.delete(index);
+  };
+  const wait = (index: number) =>
+    opened.has(index)
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => waiters.set(index, resolve));
+
+  const loadCapture = async (storagePath: string) => {
+    const index = Number(/c-(\d+)\.pdf$/.exec(storagePath)?.[1]);
+    state.started.push(index);
+    state.active += 1;
+    state.maxActive = Math.max(state.maxActive, state.active);
+    await wait(index);
+    state.active -= 1;
+    state.completed.push(index);
+    const error = failure?.(index);
+    if (error) throw error;
+    return new Blob([new Uint8Array([index])]);
+  };
+  return { state, loadCapture, release };
+}
+
+/** 一份含 `count` 份 detail 留痕的 Task：capture_no = 下标 + 1。 */
+function concurrentTask(count: number): ZxgkReportTask {
+  return task({
+    id: "t-1",
+    queries: [query("q-1", 1, "恒大集团有限公司")],
+    captures: Array.from({ length: count }, (_, index) =>
+      capture(`c-${index}`, "q-1", index + 1),
+    ),
+  });
+}
+
+test("并发夹具与 parser 的板块字段口径一致（夹具漂移会在这里失败）", () => {
+  assert.deepEqual(
+    EXECUTION_FIELDS.map(([label]) => label),
+    [...COMMON_FIELD_LABELS, EXECUTION_AMOUNT_LABEL],
+  );
+  assert.equal(classifyCapture(detailPages(1)), "detail");
+});
+
+test("并发度固定为 3，且主循环已不再逐份 await", async () => {
+  assert.equal(REPORT_CAPTURE_CONCURRENCY, 3);
+  const source = await readFile(
+    new URL("../src/lib/server/zxgk-report.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /export const REPORT_CAPTURE_CONCURRENCY = 3;/);
+  assert.match(source, /mapWithConcurrency\(/);
+  assert.doesNotMatch(
+    source,
+    /for \(const capture of selection\.captures\)/,
+    "旧的逐份串行循环必须已被池化调用替换",
+  );
+});
+
+test("mapWithConcurrency：并发上限、真实并发、按输入下标回填、边界输入", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const items = Array.from({ length: 9 }, (_, index) => index);
+  const results = await mapWithConcurrency(items, 3, async (item) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    // 只让出一次事件循环：本例不制造完成顺序（完成顺序由闸门测试单独验证），
+    // 因此不引入任何定时器，断言与平台定时器粒度无关。
+    await settle();
+    active -= 1;
+    return item * 2;
+  });
+  assert.equal(maxActive, 3, "活跃 worker 峰值必须正好是 3，不能是伪并发");
+  assert.deepEqual(
+    results,
+    items.map((item) => item * 2),
+  );
+
+  assert.deepEqual(await mapWithConcurrency([], 3, async () => 1), []);
+  assert.deepEqual(await mapWithConcurrency([7], 3, async (item) => item), [7]);
+  assert.deepEqual(
+    await mapWithConcurrency([1, 2], 5, async (item) => item + 1),
+    [2, 3],
+  );
+});
+
+test("mapWithConcurrency：完成顺序 3→1→2 仍按 1→2→3 回填", async () => {
+  const gates = new Map<number, () => void>();
+  const completed: number[] = [];
+  const pending = mapWithConcurrency([0, 1, 2], 3, async (item) => {
+    await new Promise<void>((resolve) => gates.set(item, resolve));
+    completed.push(item);
+    return `done-${item}`;
+  });
+  gates.get(2)?.();
+  await settle();
+  gates.get(0)?.();
+  await settle();
+  gates.get(1)?.();
+  assert.deepEqual(await pending, ["done-0", "done-1", "done-2"]);
+  assert.deepEqual(completed, [2, 0, 1], "完成顺序确实是 3→1→2");
+});
+
+test("mapWithConcurrency：等全部收工后按输入顺序抛第一失败，不看谁先 reject", async () => {
+  const first = new Error("index-0");
+  const later = new Error("index-2");
+  const gates = new Map<number, () => void>();
+  const completed: number[] = [];
+  const pending = mapWithConcurrency([0, 1, 2], 3, async (item) => {
+    await new Promise<void>((resolve) => gates.set(item, resolve));
+    completed.push(item);
+    if (item === 0) throw first;
+    if (item === 2) throw later;
+    return item;
+  });
+  gates.get(2)?.();
+  await settle();
+  gates.get(0)?.();
+  await settle();
+  gates.get(1)?.();
+  await assert.rejects(pending, (error: unknown) => error === first);
+  assert.deepEqual(completed, [2, 0, 1]);
+});
+
+test("并发下载 + 解析时活跃 worker 峰值恰为 3，7 份留痕不超额并发", async () => {
+  const { state, loadCapture, release } = observableLoader();
+  const pending = generateZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    tasks: [concurrentTask(7)],
+    loadCapture,
+    readPages: pagesFromBytes,
+  });
+  // 同步起跑的只有 3 个 worker（下标 0/1/2），第 4 份必须等有人收工
+  assert.deepEqual(state.started, [0, 1, 2]);
+  assert.equal(state.maxActive, 3);
+  for (let index = 0; index < 7; index += 1) release(index);
+  const report = await pending;
+  assert.deepEqual(state.started, [0, 1, 2, 3, 4, 5, 6]);
+  assert.equal(state.maxActive, 3, "全程峰值必须卡在 3，不能超额并发");
+  assert.equal(report.records, 7);
+});
+
+test("完成顺序 3→1→2 不改变输出顺序：行序与证据映射仍按 selection 顺序", async () => {
+  const { state, loadCapture, release } = observableLoader();
+  const pending = generateZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    tasks: [concurrentTask(3)],
+    loadCapture,
+    readPages: pagesFromBytes,
+  });
+  // 显式放行：完成次序 = 下标 2 → 0 → 1（与 selection 顺序相反）
+  release(2);
+  await settle();
+  assert.deepEqual(state.completed, [2]);
+  release(0);
+  await settle();
+  assert.deepEqual(state.completed, [2, 0]);
+  release(1);
+  const report = await pending;
+  assert.deepEqual(state.completed, [2, 0, 1], "完成顺序确实是 3→1→2");
+  assert.equal(report.records, 3);
+
+  const xml = await documentXml(report.buffer);
+  const evidence = [1, 2, 3].map((n) =>
+    xml.indexOf(`_Q01_${String(n).padStart(3, "0")}_20260917.pdf`),
+  );
+  assert.ok(
+    evidence.every((position) => position >= 0),
+    "证据文件名应逐行出现",
+  );
+  assert.deepEqual(
+    [...evidence].sort((left, right) => left - right),
+    evidence,
+    "evidence filename mapping 必须按 selection 顺序，而不是完成顺序",
+  );
+});
+
+test("多 Task / 多 Capture 时并发不改变全局顺序", async () => {
+  const first = task({
+    id: "t-a",
+    entity_name: "主体甲",
+    queries: [query("q-a", 1, "主体甲")],
+    captures: [capture("c-0", "q-a", 1), capture("c-1", "q-a", 2)],
+  });
+  const second = task({
+    id: "t-b",
+    entity_name: "主体乙",
+    queries: [query("q-b", 1, "主体乙")],
+    captures: [capture("c-2", "q-b", 3), capture("c-3", "q-b", 4)],
+  });
+  // 前 3 份先起跑（下标 0/1/2）；下标 1 收工后立刻接管下标 3。
+  const { state, loadCapture, release } = observableLoader();
+  const pending = generateZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    tasks: [first, second],
+    loadCapture,
+    readPages: pagesFromBytes,
+  });
+  assert.deepEqual(state.started, [0, 1, 2]);
+  release(1);
+  await settle();
+  assert.deepEqual(state.started, [0, 1, 2, 3], "空出的 worker 立刻接管下一份");
+  release(3);
+  await settle();
+  release(2);
+  await settle();
+  release(0);
+  const report = await pending;
+  assert.equal(state.maxActive, 3);
+  assert.deepEqual(
+    state.completed,
+    [1, 3, 2, 0],
+    "完成顺序与 selection 顺序不同",
+  );
+  assert.equal(report.records, 4);
+
+  const xml = await documentXml(report.buffer);
+  const order = [1, 2, 3, 4].map((n) =>
+    xml.indexOf(`_Q01_${String(n).padStart(3, "0")}_20260917.pdf`),
+  );
+  assert.ok(order.every((position) => position >= 0));
+  assert.deepEqual(
+    [...order].sort((left, right) => left - right),
+    order,
+    "跨 Task 的证据顺序仍必须是 selection 顺序",
+  );
+  assert.ok(
+    xml.indexOf("主体甲_执行_") < xml.indexOf("主体乙_执行_"),
+    "Task 顺序必须保持",
+  );
+});
+
+test("失败确定性：后序 Capture 先失败、前序 Capture 后失败，仍抛 selection 顺序上的第一失败", async () => {
+  const first = new CaptureOperationError(STORAGE_READ_MESSAGE, 502);
+  const later = new CaptureOperationError(STORAGE_READ_MESSAGE, 502);
+  const { state, loadCapture, release } = observableLoader((index) =>
+    index === 0 ? first : index === 2 ? later : undefined,
+  );
+  const pending = generateZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    tasks: [concurrentTask(3)],
+    loadCapture,
+    readPages: pagesFromBytes,
+  });
+  // 下标 2 先失败，下标 0 后失败；最终仍必须抛下标 0 的错误
+  release(2);
+  await settle();
+  release(0);
+  await settle();
+  release(1);
+  await assert.rejects(pending, (error: unknown) => error === first);
+  assert.deepEqual(
+    state.completed,
+    [2, 0, 1],
+    "下标 2 在时间上先于下标 0 失败",
+  );
+  assert.equal(state.maxActive, 3);
+});
+
+test("多份失败时也按 selection 顺序取第一失败，与完成先后无关", async () => {
+  const errors = [new Error("index-1"), new Error("index-2")];
+  const { state, loadCapture, release } = observableLoader((index) =>
+    index === 0 ? undefined : errors[index - 1],
+  );
+  const pending = generateZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    tasks: [concurrentTask(3)],
+    loadCapture,
+    readPages: pagesFromBytes,
+  });
+  release(0);
+  await settle();
+  release(2);
+  await settle();
+  release(1);
+  await assert.rejects(pending, (error: unknown) => error === errors[0]);
+  assert.deepEqual(state.completed, [0, 2, 1], "下标 2 先于下标 1 失败");
+});
+
+test("全部成功时与串行实现业务等价：document.xml 逐字相同", async () => {
+  const count = 7;
+  const tasks = [concurrentTask(count)];
+  const loader = observableLoader();
+  const pending = generateZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    tasks,
+    loadCapture: loader.loadCapture,
+    readPages: pagesFromBytes,
+  });
+  for (let index = 0; index < count; index += 1) loader.release(index);
+  const concurrent = await pending;
+  assert.equal(loader.state.maxActive, 3);
+
+  // 串行参考实现：走同一批纯函数，按 selection 顺序逐份 await（改动前的形态）。
+  const selection = selectReportCaptures(tasks);
+  const inputs: CaptureInput[] = [];
+  const detailDays: string[] = [];
+  for (const item of selection.captures) {
+    const pages = await pagesFromBytes(
+      new Uint8Array([Number(/c-(\d+)\.pdf$/.exec(item.storagePath)?.[1])]),
+    );
+    inputs.push({ fileName: item.fileName, pages });
+    if (classifyCapture(pages) === "detail") detailDays.push(item.day);
+  }
+  const serial = await renderZxgkReportDocx({
+    projectName: "北京术锐机器人有限公司",
+    result: parseExecutionTable(inputs),
+    checkDate: resolveCheckDate(detailDays),
+    skippedNonPdf: selection.skippedNonPdf,
+  });
+
+  assert.equal(concurrent.records, serial.records);
+  assert.equal(concurrent.excludedCaptures, serial.excludedCaptures);
+  const [concurrentXml, serialXml] = [
+    await documentXml(concurrent.buffer),
+    await documentXml(serial.buffer),
+  ];
+  let at = 0;
+  while (at < concurrentXml.length && concurrentXml[at] === serialXml[at])
+    at += 1;
+  assert.equal(
+    concurrentXml === serialXml,
+    true,
+    `并发与串行必须产出同一份 word/document.xml；首个差异在第 ${at} 字符：` +
+      `并发「${concurrentXml.slice(at, at + 80)}」 vs 串行「${serialXml.slice(at, at + 80)}」`,
+  );
 });
