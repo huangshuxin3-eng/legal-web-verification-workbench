@@ -152,11 +152,34 @@ tests/zxgk-report-flow.test.ts       流程 / 并发（1024 行）
 
 - `extractions` / `facts` / `citations` / `reviews` **四表方案**；
 - **character-level citation span**（字符级引用跨度）；
-- **LLM extraction layer**（LLM 抽取层）；
+- **LLM-based fact extraction from raw PDF / raw evidence**（让 LLM 从原始 PDF / 原始证据里抽事实，即此前所称的「LLM 抽取层」）；
 - **review UI**（人工审核界面）；
 - **eval harness**。
 
 当前实现是上述方案的**替代路线**：确定性解析器（`scripts/zxgk-execution-parse.ts`）+ 单表输出 + 固定报告模型，**无 AI 抽取层、无引用溯源表、无人工审核环节**。出处：2026-09-19 交接文档 §10「已明确删除的过度设计（不要重提）」。
+
+### 边界澄清：事实层确定性，解释层可 AI 辅助
+
+被否决的是**把事实层交给 LLM**，而不是**在解释层使用 LLM**。两者的边界如下：
+
+**仍然被否决** —— LLM-based fact extraction from raw PDF / raw evidence：
+
+- 不让 LLM 负责识别案件号；
+- 不让 LLM 负责抽取执行法院、金额、日期等事实；
+- 不让 LLM 替代现有 deterministic parser；
+- 事实层继续由现有规则解析器（`scripts/zxgk-execution-parse.ts`）负责。
+
+**不属于被否决范围** —— LLM analysis over already-verified structured facts：
+
+- AI 可以消费 `ParseResult.rows`（已完成解析、已验证的结构化事实）；
+- AI 用于摘要、归纳、重点事项识别、进一步核查建议；
+- AI 输出必须标识为「分析草稿」；
+- AI 不得新增不存在于结构化 facts 中的案件、金额、法院、日期等事实。
+
+> **Facts are deterministic; interpretation may be AI-assisted.**
+> 事实层是确定性的；解释层可以由 AI 辅助。
+
+以上仅**收窄**原条目的适用范围，不改变「四表方案 / character-level citation span / review UI / eval harness」的否决结论，也不改写本文其他历史设计记录。
 
 ## 已知限制
 
