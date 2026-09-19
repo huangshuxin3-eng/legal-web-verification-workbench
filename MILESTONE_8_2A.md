@@ -196,3 +196,13 @@ Side Panel 上出现过的「Query 已删除或无权访问，请重新选择。
 - 标签页只在「继续」时按需处理：原自动化标签页仍在就复用它，已被关闭才新建一个并接管（新标签页会被激活以获得焦点），**不会**导航用户当前正在浏览的标签页。这里不做长期后台专用 tab 管理，也不跨 Task 复用标签页；若原自动化标签页仍存在但用户已把它用于别的用途，继续时会把它导航回查询入口。
 - 本轮不做 Chrome 进程级断点恢复：Service Worker 被浏览器回收后，继续能力仍受限于 `chrome.storage.local.automationJob` 与「同一页第 1 页集合不变」；集合已变化则 fail closed，交由人工核对，不会自动从第 N 条继续。
 - `resume` 的 Query 校验是**运行时**判定，没有把结果落到 job 上：若 `automationJob.queryId` 已失效，`canResumeFirstPage` 仍为真，Side Panel 仍会显示「继续本次核查」，再点一次会得到同一条明确的 fail-closed 提示（可用「放弃本次核查」退出）。这样避免新增 job 字段，代价是需要人工点一次才知道 Query 已失效。
+
+---
+
+## Post-completion status（后补，非本文件原文）
+
+> 本节由文档校准轮次（2026-09-19）追加，用于消除与后续记录的表面矛盾。**本文件正文保持形成时的原状，未作改写**——上文「自动化测试」一节的结尾句反映的是本文档成文时的真实状态。
+
+2026-09-15 已完成真人 Chrome + 真实 Supabase 端到端验收，结论记录在 `NONLIT_WORKBENCH_CONTEXT.md` §10：第 1 页列表 Capture 1 / 1、详情 Capture 10 / 10、本页新增留痕 11，终态 `FIRST_PAGE_COMPLETE`，且未进入第 2 页。
+
+此后 M8.2b 已把该闭环泛化为多页全量留痕，`FIRST_PAGE_COMPLETE` 不再是新产品路径的终态；交付说明见 `MILESTONE_8_2B.md`。

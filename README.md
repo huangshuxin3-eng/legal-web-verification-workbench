@@ -1,6 +1,6 @@
 # 非诉网核工作台
 
-依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。Milestone 5 增加应用层批量任务生成器，按“核查对象 × 核查范围”预览、去重并批量创建 Task。Milestone 6 增加项目级网核成果导出，生成一份简单 Excel 清单和按主体、事项整理的 Private Capture ZIP。Milestone 8.1 增加中国执行信息公开网“执行”单 Task 半自动无结果闭环。详细说明见 [MILESTONE_4.md](MILESTONE_4.md)、[MILESTONE_5.md](MILESTONE_5.md)、[MILESTONE_6.md](MILESTONE_6.md) 和 [MILESTONE_8_1.md](MILESTONE_8_1.md)。
+依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。Milestone 5 增加应用层批量任务生成器，按“核查对象 × 核查范围”预览、去重并批量创建 Task。Milestone 6 增加项目级网核成果导出，生成一份简单 Excel 清单和按主体、事项整理的 Private Capture ZIP。Milestone 8.1 增加中国执行信息公开网“执行”单 Task 半自动无结果闭环；Milestone 8.2a 把该闭环推进到第一页列表与全部详情自动留痕；Milestone 8.2b 泛化为多页全量留痕并支持中断恢复；Milestone 8.3 增加尽调报告线，把留痕解析为 Excel 执行记录核对表与 docx 尽调报告、接入项目页入口，并完成留痕加载的有界并发优化。详细说明见 [MILESTONE_4.md](MILESTONE_4.md)、[MILESTONE_5.md](MILESTONE_5.md)、[MILESTONE_6.md](MILESTONE_6.md)、[MILESTONE_8_1.md](MILESTONE_8_1.md)、[MILESTONE_8_2A.md](MILESTONE_8_2A.md)、[MILESTONE_8_2B.md](MILESTONE_8_2B.md) 和 [MILESTONE_8_3.md](MILESTONE_8_3.md)。
 
 已通过 M1/M2 的数据库只执行 `supabase/migrations/202609140003_milestone_3.sql`，不要重跑旧迁移。完整升级、权限、失败恢复和验收说明见 [Milestone 3 交付说明](./MILESTONE_3.md)。仅使用原有 Publishable Key 和登录用户 JWT，没有新增环境变量或 service role 依赖。
 
@@ -24,6 +24,9 @@
 - Project Workbench 支持导出网核成果 ZIP；只导出有 Capture 的 Task，内含单 Sheet Excel 清单及按主体、事项分层的全部 Private Capture 文件，并复用工作台的规范排序。
 - Chrome Side Panel 使用可搜索 Task Picker，按核查对象、事项、网站名称过滤，并用当前标签页与 Task URL 的完整 hostname 精确匹配推荐项。
 - 支持 `执行 + 中国执行信息公开网` 的确定性半自动核查：每轮固定使用 `Task.entity_name`，不读取手工选中的 Query；滑块始终人工完成，明确无结果后新建本轮 Query 和 PDF Capture，有结果则新建本轮 Query 后暂停等待人工核查，同一 Task 可重复发起并记录多次真实检索。
+- 支持上述网站的第一页全量留痕：确认有结果后复用同一检索词的 canonical Query（无则新建一次），先留痕第一页结果列表，再按网站展示顺序逐条打开详情并生成 PDF，每次返回列表后复核仍在第 1 页；全部完成后停在 `FIRST_PAGE_COMPLETE`，不触发任何分页动作。
+- 支持多页全量留痕：从第一页之后逐页推进直到最后一页，每页都先留痕列表再逐条留痕详情；页间以冻结结果集合与网站自报总页数 baseline 为判据，任一不一致即暂停（`RESUME_BOUNDARY_CHANGED` / `TOTAL_PAGES_CHANGED`），中断后可恢复且不重复留痕，最终写 `DONE`。
+- 项目页支持一次点击生成 docx 尽调报告；开发 CLI 另可把留痕解析为 Excel 执行记录核对表（主表 + 未纳入清单）。解析为确定性实现，报告只在核查完成后生成，未引入 AI 抽取。
 
 只使用四张业务表。Web 手动留痕支持 PDF/PNG/JPG、私有预览、中文名下载、确认删除和 Query/Task 留痕计数；Extension 的手工模式仍只选择已有 Query 并归档当前网页，M8.1 仅在确认实际查询结果后创建本次 Query。
 
@@ -64,23 +67,47 @@ USING 限制读取、更新和删除已有行；WITH CHECK 限制插入以及更
 ```text
 nonlit-workbench/
 ├── src/app/
-│   ├── layout.tsx                     # 全局布局与 AuthProvider
-│   ├── page.tsx                       # 项目列表
-│   ├── globals.css                    # Tailwind 与基础样式
-│   └── projects/[projectId]/page.tsx   # 工作台路由，没有 Task 详情页
+│   ├── layout.tsx                      # 全局布局与 AuthProvider
+│   ├── page.tsx                        # 项目列表
+│   ├── globals.css                     # Tailwind 与基础样式
+│   ├── projects/[projectId]/page.tsx   # 工作台路由，没有 Task 详情页
+│   ├── projects/[projectId]/tasks/generate/page.tsx   # 批量任务生成页
+│   └── api/                            # Route Handlers（用户 JWT + RLS）
+│       ├── captures/…                  # 留痕写入、修改删除、恢复
+│       ├── projects/[projectId]/export/route.ts   # 项目成果导出（ZIP + Excel）
+│       ├── projects/[projectId]/report/route.ts   # 尽调报告生成入口（返回 docx）
+│       ├── queries/[queryId]/route.ts
+│       └── tasks/…                     # 单条 / 批量 / 生成
 ├── src/components/
-│   ├── auth-provider.tsx              # 登录、会话、退出
-│   ├── dialog.tsx                     # Modal/Drawer 共用模态容器
-│   ├── project-form.tsx               # 创建项目
-│   ├── project-workspace.tsx          # Task 查询、筛选及写入
-│   ├── task-form.tsx                  # 新增/编辑 Task
-│   └── task-drawer.tsx                # Task 详情
+│   ├── auth-provider.tsx               # 登录、会话、退出
+│   ├── dialog.tsx                      # Modal/Drawer 共用模态容器
+│   ├── project-form.tsx                # 创建项目
+│   ├── project-export-dialog.tsx       # 项目成果导出
+│   ├── project-report-dialog.tsx       # 「生成尽调报告」按钮与下载
+│   ├── project-workspace.tsx           # Task 查询、筛选及写入
+│   ├── capture-section.tsx             # 留痕列表与操作
+│   ├── query-section.tsx               # Query 列表与操作
+│   ├── task-generator.tsx              # 批量任务生成
+│   ├── task-form.tsx                   # 新增/编辑 Task
+│   └── task-drawer.tsx                 # Task 详情
 ├── src/lib/
-│   ├── database.types.ts             # 四层数据与 Supabase 类型
-│   ├── supabase.ts                    # 浏览器客户端单例
-│   └── tasks.ts                       # 状态、网址与错误处理
-├── supabase/migrations/202609140001_milestone_1.sql
-├── tests/database.test.ts             # 真实 PostgreSQL 语义的隔离测试
+│   ├── database.types.ts               # 四层数据与 Supabase 类型
+│   ├── supabase.ts                     # 浏览器客户端单例
+│   ├── tasks.ts                        # 状态、网址与错误处理
+│   ├── report-names.ts                 # 报告命名 / 核查日 / 范围口径（服务端与 UI 共用）
+│   ├── project-export.ts               # 导出命名与打包口径
+│   └── server/
+│       └── zxgk-report.ts              # 尽调报告服务端流水线（下载 → 解析 → 渲染 docx）
+├── scripts/                            # 开发 CLI，不是产品入口
+│   ├── zxgk-execution-parse.ts         # 解析器与主表列定义（唯一事实来源）
+│   ├── zxgk-report-docx.ts             # docx 渲染器
+│   ├── build-execution-table.ts        # Excel 执行记录核对表 CLI
+│   └── build-report-docx.ts            # docx 报告 CLI
+├── extension/                          # Chrome Side Panel，独立包，dist/ 产物随仓库入库
+│   ├── src/                            # worker.mjs / sidepanel / adapters / lib
+│   └── tests/                          # 扩展侧自动化测试
+├── supabase/migrations/                # 202609140001 ~ 202609140004（四份）
+├── tests/                              # 根测试，含 zxgk-execution-parse / zxgk-report-docx / zxgk-report-flow
 ├── .env.example
 ├── package.json
 └── package-lock.json
@@ -110,10 +137,13 @@ npm run dev
 ```powershell
 npm run typecheck
 npm run test:db
+npm run extension:test
 npm run format:check
 npm run build
 npm start
 ```
+
+Extension 另有 `npm run extension:build`，生成 `extension/dist`（产物随仓库入库）。
 
 `npm start` 启动生产构建，与 `npm run dev` 二选一。环境变量修改后重启；生产使用时需重新 build。
 
@@ -154,4 +184,6 @@ npm start
 
 ## 9. 当前阶段边界
 
-Milestone 4 代码已实现。由用户执行 M4 migration、加载 `extension/dist` 并按 MILESTONE_4.md 完成真实 Chrome + Supabase 双账号验收；本阶段未实现 Excel、ZIP、AI、OCR 或自动网页操作。
+Milestone 8.3 代码已实现并接入产品入口。M8.1 / M8.2a / M8.2b / M8.3 的自动化测试与门禁（`typecheck`、`test:db`、`extension:test`、`format:check`、`build`）在 commit `116e93d` 上全部通过；真人 Chrome + Supabase 验收按各阶段交付说明执行。
+
+本阶段未实现：AI 抽取与 AI 页面判断、OCR、异步 report job 与报告产物持久化、第二网站 adapter、报告线 Step 2 / Step 3（核查说明与律师提示模板）、Run 数据表与 Capture 新字段、自动绕过滑块。

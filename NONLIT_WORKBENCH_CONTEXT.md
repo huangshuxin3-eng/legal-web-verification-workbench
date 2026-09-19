@@ -1,9 +1,12 @@
 # NONLIT_WORKBENCH_CONTEXT.md
 
-> 项目：非诉网核工作台（Nonlit Workbench）  
-> 用途：跨对话 / 跨 Agent 的长期项目上下文与决策记录  
-> 最近更新：2026-09-15  
-> 当前正式 checkpoint：`f595d95 test: cover archive bridge contract`
+> 项目：非诉网核工作台（Nonlit Workbench）
+>
+> 用途：跨对话 / 跨 Agent 的长期项目上下文与决策记录
+>
+> 最近更新：2026-09-19
+>
+> 当前正式 checkpoint：`116e93d perf: parallelize zxgk report capture loading`
 
 ---
 
@@ -203,6 +206,8 @@ UI 统一使用“留痕”。
 ### M6.5 大项目 Task 可用性 ✅
 ### M8.1 半自动执行 ✅
 ### M8.2a 第一页结果 + 全详情自动留痕 ✅
+### M8.2b 多页全量留痕 + 中断恢复 ✅
+### M8.3 ZXGK 尽调报告线（解析 → 核对表 → 报告）+ 留痕加载有界并发 ✅
 
 关键历史 checkpoint：
 
@@ -218,6 +223,17 @@ f519303 feat: complete milestone 5 task workflow
 55c6b20 refactor: validate zxgk automation recovery invariants
 5592764 refactor: centralize automation progress view model
 f595d95 test: cover archive bridge contract
+bc933fc docs: record stabilization and zxgk pagination facts
+bc26084 refactor: generalize zxgk automation page state
+4f3ce3b feat: expose zxgk page navigation adapter primitives
+e65c3c8 feat: add deterministic zxgk page advance protocol
+cc6f438 feat: add zxgk two-page execution flow
+901c48a feat: add durable zxgk resume recovery
+de05324 feat: add generic zxgk multipage automation
+9db6489 feat: add zxgk detail report extraction
+44331cc feat: add zxgk docx report generation
+1e39a6e feat: integrate zxgk docx report generation
+116e93d perf: parallelize zxgk report capture loading
 ```
 
 ---
@@ -979,8 +995,6 @@ Architecture Stabilization Step 1～3 已完成。本轮没有实现或修改：
 
 当前不要处理：
 
-- M8.2b 分页；
-- 第 2 页及之后；
 - 第二网站 adapter；
 - AI Query suggestion；
 - AI 页面判断；
@@ -992,7 +1006,7 @@ Architecture Stabilization Step 1～3 已完成。本轮没有实现或修改：
 - `.dist-previous` build cleanup；
 - 大规模框架式重构。
 
-先完成完整 M8.2a 真人回归并建立 stabilization checkpoint，再设计 M8.2b。
+「M8.2b 分页 / 第 2 页及之后」已于 2026-09-16 ~ 09-17 完成（见 §27 与 `MILESTONE_8_2B.md`），**不再是暂缓事项**；M8.2a 的完整真人回归也已在 2026-09-15 通过（见 §10）。
 
 已知技术债继续保留，本轮均未处理：
 
@@ -1026,7 +1040,7 @@ extension/.dist-previous
 
 ---
 
-## 23. 最近 Git 状态
+## 23. M8.2a 提交前的 Git 状态（历史）
 
 M8.2a commit 前已完成：
 
@@ -1038,6 +1052,7 @@ M8.2a commit 前已完成：
   - `extension/dist/print-config.mjs`
   - `extension/dist/viewer.html`
   - `extension/dist/viewer.mjs`
+- 这 6 个 `dist` 文件的 CRLF 噪声**可复现**：执行 `npm run extension:test` 之后它们会重新变成 modified，而 `git diff --numstat` 对它们全部为**空**（零内容改动，仅行尾差异；`core.autocrlf = true`）。提交前逐个 `git checkout --` 还原即可，不要把它们带进提交。
 - 删除终端误粘贴产生的未跟踪垃圾文件；
 - 确认：
   - `extension/manifest.json` 未改；
@@ -1060,16 +1075,13 @@ f595d95 test: cover archive bridge contract
 
 ## 24. 下一步
 
-执行顺序：
-
 ```text
-Architecture Stabilization 完成
-→ 完整 M8.2a 真人回归
-→ 建立 stabilization checkpoint
-→ 再设计 M8.2b 分页
+产品下一阶段待重新选择 / Prioritization pending
 ```
 
-不要直接开始分页。
+- M8.2b 分页（见 §27）与 M8.3 报告线（见 §28）均**已完成并交付**，不再是「下一步」。
+- 本节**不指定**下一个里程碑，也不自行选择 Stage 6 方向；由产品侧重新裁决后再更新本文件。
+- 历史演进仅作留痕（均已发生）：Architecture Stabilization → M8.2a 完整真人回归 → stabilization checkpoint → M8.2b 分页 → M8.3 报告线。
 
 ---
 
@@ -1101,7 +1113,9 @@ Architecture Stabilization 完成
 - **A. 源码级 CONFIRMED** —— 只读抓取真实 HTML / JS 得出；
 - **B. 真人 Chrome CONFIRMED** —— 真人操作确认。
 
-本节**不实现任何代码**。M8.2b 实现仍未开始；§21 暂缓事项中关于「M8.2b 分页 / 第 2 页及之后」的约束，对**实现**部分继续有效。
+本节**不实现任何代码**——本节记录时（2026-09-16）M8.2b 实现尚未开始；§21 暂缓事项中关于「M8.2b 分页 / 第 2 页及之后」的约束，当时对**实现**部分继续有效。
+
+> 后续进展：M8.2b 实现已于 2026-09-16 ~ 09-17 完成，见 §27 与 `MILESTONE_8_2B.md`。本节锁定的网站事实与设计基线继续有效，未被弱化。
 
 ### 26.1 事实来源与限制
 
@@ -1278,4 +1292,81 @@ M8.2b Slice 0 ✅ COMPLETE
 不存在阻塞 M8.2b 的网站事实。
 ```
 
-下一步：**Slice 1 — Runtime Page Model + Invariant**（本轮未开始）。
+当时下一步：**Slice 1 — Runtime Page Model + Invariant**（本节记录时未开始）。
+
+> 后续进展：Slice 1 及之后的实现已于 2026-09-16 ~ 09-17 完成，见 §27 与 `MILESTONE_8_2B.md`。本节锁定的网站事实与设计基线，对实现部分继续有效且未被弱化。
+
+---
+
+## 27. M8.2b 实现记录（Slice 1 起）
+
+完成日期：2026-09-16 ~ 2026-09-17。交付说明见 `MILESTONE_8_2B.md`。
+
+提交序列：`bc26084` → `4f3ce3b` → `e65c3c8` → `cc6f438` → `901c48a` → `de05324`（另有 Slice 0 事实记录提交 `bc933fc`，只改本文件，不属实现改动）。
+
+Slice / commit 对应关系——只标注**有明文出处**的编号，其余阶段不另行编号：
+
+| 提交      | 能力                                                 | 编号出处                                           |
+| --------- | ---------------------------------------------------- | -------------------------------------------------- |
+| `bc933fc` | 事实记录（仅改 `NONLIT_WORKBENCH_CONTEXT.md`）       | §26「M8.2b Slice 0」                               |
+| `bc26084` | page-state generalization（页面状态模型泛化）        | §26.8「Slice 1 — Runtime Page Model + Invariant」   |
+| `4f3ce3b` | navigation adapter primitives                        | `extension/src/adapters/zxgk-execution.mjs`         |
+| `e65c3c8` | deterministic advance（确定性页推进协议）            | `extension/tests/zxgk-page-advance.test.mjs`        |
+| `cc6f438` | two-page flow（两页执行流）                          | `extension/tests/zxgk-two-page-run.test.mjs`        |
+| `901c48a` | durable resume（中断恢复）                           | `extension/tests/zxgk-multipage-resume.test.mjs`    |
+| `de05324` | generic multipage automation（通用多页）             | `automation-state.mjs` 状态注释「Slice 5 重新定义」 |
+
+**本线最终 checkpoint：`de05324`**（分页线最后一个提交；其后的 `9db6489` 起进入 M8.3 报告线）。
+
+在 §26 的事实与设计基线之上实现的内容：
+
+- **页面状态模型**：新增 `ADVANCING_PAGE`、`PARTIAL_COMPLETE`；多页成功终态统一为 `DONE`；`FIRST_PAGE_COMPLETE` 退为 M8.2a 的 legacy 终止态（读取兼容，新产品路径不再产生）。`PARTIAL_COMPLETE` 是「已有连续完整前缀 `1..K`、但网站仍有剩余页」的**稳定 checkpoint**——不是错误、不是运行中，后台重启时不会被改写成 `FAILED`；Slice 5 起新核查不再产生它。
+- **导航 primitives**：`jumpToPageExpression(targetPage)` 负责跳页；`validatePage` / `validateFirstPage` / `freezePageRows` / `locateRowKey` / `reconcileRowKeys` / `reconcileFrozenSet` 负责落页判定与冻结集合比对。
+- **页推进协议**：先校验页范围 → 设 `#currentPage` → `search()` → 以真实页面信号验证；wrong page 一律 fail closed；**不依赖 `goPage()`**，越界校验自担。
+- **两页执行流**：`cc6f438` 起一次运行覆盖前两页。
+- **durable resume**：`901c48a` 把 same-environment pending `PAGE_ADVANCE` settle 与 fresh resume 分开；fresh resume 走「重建查询 → CAPTCHA → Page 1 → baseline totalPages → direct jump Page N → 页面信号验证 → frozen-set reconciliation → continue」，**不逐页 next**；legacy Page 1 继续分页前先 reconcile 且不重新 Capture。
+- **通用多页**：`de05324` 把「两页」泛化为 N 页，连续推进到末页直到 `DONE`（`totalPages = 1` 亦同）。
+
+范围与边界：改动集中在 `extension/src`（及随仓库入库的 `extension/dist`）；Workbench 侧与数据库侧 **0 改动**，0 migration / 0 schema / 0 RLS，Capture 仍六字段，`automationJob` 仍只在 `chrome.storage.local`。
+
+测试：`extension:test` 由 M8.2a 的 79 / 79 增至 **219 / 219**。
+
+真人多页端到端验收的结论与证据：**待补入档**（用户保留，本文件暂不记录）。
+
+---
+
+## 28. M8.3 ZXGK 尽调报告线
+
+完成日期：2026-09-18 ~ 2026-09-19。交付说明见 `MILESTONE_8_3.md`。
+
+提交序列：
+
+```text
+9db6489 feat: add zxgk detail report extraction        解析器 + CLI + 15 测试
+44331cc feat: add zxgk docx report generation          docx 报告生成
+1e39a6e feat: integrate zxgk docx report generation     接入产品入口
+116e93d perf: parallelize zxgk report capture loading   留痕加载有界并发
+```
+
+- **解析层**唯一事实来源 = `scripts/zxgk-execution-parse.ts`；主表列 `MAIN_TABLE_COLUMNS` 共 **20 列**（元信息 4 + 通用 6 + 执行标的 + 终本 2 + 失信 6 + 长文本 1）。
+- **报告口径**（人工 LOCK，2026-09-17 二次修正）见 `MILESTONE_8_3.md`：一条网站原始记录 = 一行、除列表页外所有 detail 入同一主表、多板块不拆不合并、空值语义四分、只在核查完成后出报告。
+- **产品入口** `GET /api/projects/[projectId]/report` 当前**只生成 docx**；Excel 执行记录核对表仍由开发 CLI（`scripts/build-execution-table.ts`）生成。
+- **并发加固**：`REPORT_CAPTURE_CONCURRENCY = 3` + `mapWithConcurrency`，只作用于 capture load + readPages，DB metadata 仍串行；基线画像 198s 中约 96.3% 花在 Storage 下载，瓶颈是到 Supabase 东京区的跨境链路，不是解析。
+
+**Stage 5 性能事实（生产构建 + 真实浏览器 E2E，2026-09-19）**：
+
+| 指标                             | 串行基线                                 | bounded concurrency = 3 |
+| -------------------------------- | ---------------------------------------- | ----------------------- |
+| production E2E 端到端 wall       | ≈ 35.4s                                  | **≈ 10.17s**（省 ≈71.3%） |
+| Storage 最大 in-flight          | 1                                        | 3                       |
+| Supabase 请求成功率              | —                                        | **36 / 36 全部 200**，零 retry / 4xx / 5xx |
+| `word/document.xml` md5          | `ea7bb19d66108dde3c6539f422315700`       | **保持同值**（与串行逐字等价） |
+| 内容正确性                       | —                                        | 28 records / 3 excluded / problems = 0 |
+
+- **归因纪律（必须保留）**：同轮 `Σ(total) / wall ≈ 2.61×` 才是**同一轮内可直接观察的并发压缩证据**；`35.4s → 10.17s ≈ 3.48×` 是**跨轮**比较，两轮网络窗口不同，**不能全部归因于代码改动**。
+- **已废弃的旧推断**：「payload transfer ≈158s / ≈39KB/s」是**推断值而非实测**，已被上述生产 E2E 结果取代，**不得再作为当前结论引用**（`MILESTONE_8_3.md` 已同步标注 superseded）。
+- **编号说明**：既有材料混用 `Step` 与 `Stage`（两份 2026-09-19 review 用的是 `Stage 4` / `Stage 5`，其中 Stage 4 是产品入口接入后的一次浏览器 E2E）。本文件与 `MILESTONE_8_3.md` 均以提交为锚，不另立编号。
+
+测试：`test:db` 181 / 181。
+
+2026-09-19 的两份 review 位于 `nonlit-workbench-output/20260919/`：`Stage5_Report_Runtime_Hardening_Design_Review.md`（性能画像、方案比较、风险）与 `Stage5_Report_Concurrency_Code_Review.md`（实现核验、门禁记录）。
