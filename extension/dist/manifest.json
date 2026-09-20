@@ -24,6 +24,6 @@
   },
   "host_permissions": [
     "https://rcfjgjxwftwkdbiwsavy.supabase.co/*",
-    "http://localhost:3000/*"
+    "https://legal-web-verification-workbench.vercel.app/*"
   ]
 }

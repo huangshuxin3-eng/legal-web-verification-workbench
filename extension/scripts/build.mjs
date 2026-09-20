@@ -1,6 +1,11 @@
 import { cp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildModeFromArgs,
+  httpOrigin,
+  resolveWorkbenchUrl,
+} from "./build-config.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const extension = resolve(here, "..");
@@ -39,26 +44,21 @@ const env = Object.fromEntries(
 );
 const supabaseUrl = env.NEXT_PUBLIC_SUPABASE_URL;
 const publishableKey = env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-const workbenchUrl = env.NEXT_PUBLIC_WORKBENCH_URL || "http://localhost:3000";
+const mode = buildModeFromArgs(process.argv.slice(2));
+const workbenchUrl = resolveWorkbenchUrl(mode, env);
 if (!supabaseUrl || !publishableKey)
   throw new Error(
     `${envPath} 缺少 NEXT_PUBLIC_SUPABASE_URL 或 NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`,
   );
-for (const [name, value] of Object.entries({ supabaseUrl, workbenchUrl })) {
-  const url = new URL(value);
-  if (!/^https?:$/.test(url.protocol) || url.pathname !== "/")
-    throw new Error(`${name} 必须是 HTTP(S) Origin，不含路径`);
-}
+const supabaseOrigin = httpOrigin("supabaseUrl", supabaseUrl);
+const workbenchOrigin = httpOrigin("workbenchUrl", workbenchUrl);
 
 await rm(staging, { recursive: true, force: true });
 await cp(src, staging, { recursive: true });
 const manifest = JSON.parse(
   await readFile(resolve(extension, "manifest.template.json"), "utf8"),
 );
-manifest.host_permissions = [
-  `${new URL(supabaseUrl).origin}/*`,
-  `${new URL(workbenchUrl).origin}/*`,
-];
+manifest.host_permissions = [`${supabaseOrigin}/*`, `${workbenchOrigin}/*`];
 await writeFile(
   resolve(staging, "manifest.json"),
   JSON.stringify(manifest, null, 2) + "\n",
@@ -81,4 +81,4 @@ try {
 }
 await rename(staging, dist);
 await rm(previous, { recursive: true, force: true }).catch(() => {});
-console.log(`Built unpacked extension: ${dist}`);
+console.log(`Built ${mode} unpacked extension: ${dist}`);

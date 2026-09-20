@@ -12,6 +12,7 @@
     "format:check": "prettier --check src tests package.json tsconfig.json postcss.config.mjs README.md MILESTONE_3.md MILESTONE_4.md MILESTONE_5.md MILESTONE_6.md MILESTONE_8_1.md MILESTONE_8_2A.md",
     "test:db": "node --experimental-strip-types --test tests/*.test.ts",
     "extension:build": "npm --prefix extension run build",
+    "extension:build:production": "npm --prefix extension run build:production",
     "extension:test": "npm --prefix extension test"
   },
   "dependencies": {
