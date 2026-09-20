@@ -23,6 +23,9 @@ test("manifest requests only the five Milestone 4 permissions", async () => {
   ]);
   assert.equal(manifest.host_permissions, undefined);
   assert.equal(manifest.side_panel.default_path, "sidepanel.html");
+  assert.equal(manifest.name, "非诉网核 · 网页核查助手");
+  assert.equal(manifest.short_name, "网页核查助手");
+  assert.equal(manifest.action.default_title, "非诉网核 · 网页核查助手");
 });
 
 test("Chinese PDF business filename is deterministic and Windows safe", () => {

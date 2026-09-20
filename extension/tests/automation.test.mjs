@@ -727,13 +727,13 @@ test("DONE/FAILED/HAS_RESULT/FIRST_PAGE_COMPLETE 允许新一轮，运行中状�
   );
 });
 
-test("Side Panel 区分手工 Query，自动请求只发送 Task 上下文", async () => {
+test("Side Panel 区分手工检索批次，自动请求只发送核查任务上下文", async () => {
   const [panel, html] = await Promise.all([
     readFile(new URL("../src/sidepanel.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/sidepanel.html", import.meta.url), "utf8"),
   ]);
-  assert.match(html, /Query（手工流程）/);
-  assert.match(html, /当前 Query 仅用于手工留痕，不控制自动核查/);
+  assert.match(html, />检索批次<select id="query"/);
+  assert.match(html, /当前检索批次仅用于手工留痕，不控制自动核查/);
   assert.match(html, /自动核查无需预先创建/);
   assert.match(html, /id="automation-ready-query"/);
   assert.match(html, /id="automation-query-text"/);
@@ -2317,13 +2317,13 @@ test("canResumeAutomation 只在存在可恢复检查点时为真", async () => 
   );
 });
 
-test("Side Panel 提供「继续剩余分页核查」，与重新开始区分", async () => {
+test("Side Panel 提供「继续核查」，与重新开始区分", async () => {
   const [panel, html] = await Promise.all([
     readFile(new URL("../src/sidepanel.mjs", import.meta.url), "utf8"),
     readFile(new URL("../src/sidepanel.html", import.meta.url), "utf8"),
   ]);
   assert.match(html, /id="automation-resume"/);
-  assert.match(html, /继续剩余分页核查/);
+  assert.match(html, /继续核查/);
   assert.match(html, /id="automation-resume-block"/);
   assert.match(panel, /deriveZxgkAutomationProgressViewModel\(automationJob\)/);
   assert.match(panel, /const resumable = progress\.canResume/);

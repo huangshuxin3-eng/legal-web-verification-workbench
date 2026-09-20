@@ -288,7 +288,7 @@ export function ProjectWorkspace({
       >
         ← 我的项目
       </Link>
-      <div className="mt-7 flex flex-wrap items-start justify-between gap-6">
+      <div className="workspace-hero mt-7 flex flex-wrap items-start justify-between gap-6 px-5 py-5 sm:px-6">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="break-words text-3xl font-semibold tracking-tight text-slate-950">
@@ -397,7 +397,7 @@ export function ProjectWorkspace({
       )}
       <section
         aria-label="流程概览"
-        className="mt-7 rounded-xl border border-slate-200/50 bg-white/40 px-5 py-3 sm:px-6"
+        className="tech-glass-panel mt-5 px-5 py-3 sm:px-6"
       >
         <div className="mb-2 flex items-center justify-between gap-4">
           <h2 className="text-sm font-semibold text-slate-800">流程概览</h2>

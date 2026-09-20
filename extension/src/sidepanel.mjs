@@ -62,12 +62,12 @@ async function chooseProject(id, restoreTask) {
   $("task").value = "";
   $("task-search").value = "";
   $("task-search").disabled = true;
-  $("selected-task").textContent = "正在加载 Task…";
-  $("task-site").textContent = "";
+  $("selected-task").textContent = "正在加载核查任务…";
+  $("current-check").hidden = true;
   $("no-query").hidden = true;
   $("count").textContent = "—";
   closeTaskPicker();
-  fill($("query"), [], "请选择 Query");
+  fill($("query"), [], "请选择检索批次");
   $("query").disabled = true;
   taskRows = id ? await data.tasks(id) : [];
   $("task-search").disabled = !id || !taskRows.length;
@@ -127,8 +127,8 @@ function renderTaskPicker() {
   $("selected-task").textContent = selectedTask
     ? `${selectedTask.entity_name} · ${selectedTask.topic} · ${selectedTask.source_name}`
     : taskRows.length
-      ? "请选择 Task"
-      : "项目中没有 Task";
+      ? "请选择核查任务"
+      : "项目中没有核查任务";
   const groups = groupTasksForPicker(
     taskRows,
     activeTab?.url,
@@ -137,19 +137,25 @@ function renderTaskPicker() {
   const container = $("task-options");
   container.replaceChildren();
   appendTaskGroup(container, "当前网站匹配", groups.matches);
-  appendTaskGroup(container, "全部 Task", groups.others);
+  appendTaskGroup(container, "全部核查任务", groups.others);
   if (!groups.matches.length && !groups.others.length) {
     const empty = document.createElement("p");
     empty.className = "task-empty";
-    empty.textContent = "没有匹配的 Task";
+    empty.textContent = "没有匹配的核查任务";
     container.append(empty);
   }
 }
+function renderCurrentCheck(task) {
+  $("current-check").hidden = !task;
+  $("current-check-entity").textContent = task?.entity_name || "";
+  $("current-check-scope").textContent = task
+    ? `${task.topic} · ${task.source_name}`
+    : "";
+  $("current-check-query").textContent = task?.entity_name || "";
+}
 async function chooseTask(id, restoreQuery) {
   const task = taskRows.find((row) => row.id === id);
-  $("task-site").textContent = task
-    ? `核查网站：${task.source_name}（${task.source_url}）`
-    : "";
+  renderCurrentCheck(task);
   fill($("query"), [], "加载中…");
   $("query").disabled = true;
   queryRows = id ? await data.queries(id) : [];
@@ -158,7 +164,7 @@ async function chooseTask(id, restoreQuery) {
     queryRows.map((q) =>
       option(q.id, `Q${String(q.query_no).padStart(2, "0")} · ${q.query_text}`),
     ),
-    queryRows.length ? "请选择 Query" : "没有 Query",
+    queryRows.length ? "请选择检索批次" : "没有检索批次",
   );
   $("query").disabled = !id || !queryRows.length;
   $("no-query").hidden = !id || queryRows.length > 0;
@@ -190,7 +196,7 @@ const automationLabels = {
   [AUTOMATION_STATES.SUBMITTING_QUERY]: "正在提交查询",
   [AUTOMATION_STATES.WAITING_HUMAN_VERIFICATION]: "需要人工验证",
   [AUTOMATION_STATES.CHECKING_RESULT]: "正在检查查询结果",
-  [AUTOMATION_STATES.CREATING_QUERY]: "正在创建 Query",
+  [AUTOMATION_STATES.CREATING_QUERY]: "正在创建检索批次",
   [AUTOMATION_STATES.CAPTURING_NO_RESULT]: "正在生成并归档无结果留痕",
   [AUTOMATION_STATES.HAS_RESULT_UNSUPPORTED]: "已发现查询结果，需要人工继续",
   // 页内状态的文案不再写死“第 1 页”：具体页码由 automation-result
@@ -242,6 +248,18 @@ function unfinishedProgressLines(view) {
   );
   return lines;
 }
+function automationStatusClass(job, progress) {
+  if (job.state === AUTOMATION_STATES.DONE) return "status-success";
+  if (job.state === AUTOMATION_STATES.FAILED) return "status-error";
+  if (
+    job.state === AUTOMATION_STATES.PAUSED ||
+    progress.waitingForHumanVerification ||
+    progress.partialComplete ||
+    progress.firstPageComplete
+  )
+    return "status-warning";
+  return "status-info";
+}
 function renderAutomation() {
   const task = taskRows.find((row) => row.id === $("task").value);
   const canStart =
@@ -249,6 +267,9 @@ function renderAutomation() {
   $("automation-ready").hidden = !canStart;
   $("automation-ready-entity").textContent = task?.entity_name || "";
   $("automation-ready-query").textContent = task?.entity_name || "";
+  $("automation-ready-scope").textContent = task
+    ? `${task.topic} · ${task.source_name}`
+    : "";
   $("automation-start").textContent = automationJob
     ? "再次自动核查"
     : "开始自动核查";
@@ -257,7 +278,9 @@ function renderAutomation() {
   if (!automationJob) {
     $("automation-start").hidden = false;
     $("automation-resume").hidden = true;
-    $("automation-resume-block").hidden = true;
+    $("automation-resume-shell").hidden = true;
+    $("automation-result-shell").hidden = true;
+    $("automation-next").hidden = true;
     updateButton();
     return;
   }
@@ -269,6 +292,8 @@ function renderAutomation() {
     `${automationJob.topic || "执行"} · ${automationJob.sourceName || "中国执行信息公开网"}`;
   $("automation-status").textContent =
     automationLabels[automationJob.state] || automationJob.state;
+  $("automation-status").className =
+    `status-badge ${automationStatusClass(automationJob, progress)}`;
   const waiting = progress.waitingForHumanVerification;
   $("automation-verification").hidden = !waiting;
   const canContinue = progress.canContinue;
@@ -281,17 +306,22 @@ function renderAutomation() {
   // 有未完成进度时，主要动作是「继续本次核查」，而不是重新开始。
   $("automation-start").hidden = resumable;
   $("automation-resume").hidden = !resumable;
+  $("automation-resume").textContent = "继续核查";
   $("automation-resume").disabled =
     automationBusy || $("task").value !== automationJob.taskId;
-  $("automation-resume-block").hidden = !resumable;
+  $("automation-resume-shell").hidden = !resumable;
   $("automation-resume-block").textContent = resumable
     ? unfinishedProgressLines(progress).join("\n")
     : "";
+  $("automation-next").hidden = !resumable && !canContinue;
   $("automation-dismiss").hidden = false;
   $("automation-dismiss").disabled = automationBusy;
   $("automation-dismiss").textContent = resumable
     ? "放弃本次核查"
     : "返回手工模式";
+  $("automation-dismiss").className = resumable
+    ? "link danger-link"
+    : "link";
   const lines = [];
   const currentPage = progress.currentPage ?? 1;
   const totalPages = progress.totalPages;
@@ -302,15 +332,15 @@ function renderAutomation() {
         "✓ 查询完成",
         `✓ 已自动处理到第 ${currentPage} 页（网站共 ${totalPages} 页）`,
         `✓ 本次新增留痕：${progress.completedPageCaptureCount}`,
-        `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
+        `检索批次：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
       );
     } else {
       lines.push(
         "✓ 查询完成",
         "✓ 未发现相关结果",
         "✓ 已生成 1 份留痕",
-        `Query：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
-        `留痕：${automationJob.filename || "已归档"}`,
+        `检索批次：Q${String(automationJob.query?.query_no || 0).padStart(2, "0")}`,
+        `证据留痕：${automationJob.filename || "已归档"}`,
       );
     }
   } else if (progress.partialComplete) {
@@ -361,7 +391,22 @@ function renderAutomation() {
   ) {
     lines.push(automationJob.error || "自动核查未能继续。请返回手工模式。");
   }
-  $("automation-result").hidden = !lines.length;
+  $("automation-result-shell").hidden = !lines.length;
+  $("automation-result-shell").className = `info-surface${
+    automationJob.state === AUTOMATION_STATES.FAILED
+      ? " is-error"
+      : automationJob.state === AUTOMATION_STATES.PAUSED
+        ? " is-warning"
+      : automationJob.state === AUTOMATION_STATES.DONE
+        ? " is-success"
+        : ""
+  }`;
+  $("automation-result-label").textContent =
+    [AUTOMATION_STATES.FAILED, AUTOMATION_STATES.PAUSED].includes(
+      automationJob.state,
+    )
+      ? "原因"
+      : "状态说明";
   $("automation-result").textContent = lines.join("\n");
   updateButton();
 }

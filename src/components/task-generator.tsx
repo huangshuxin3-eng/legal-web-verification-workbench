@@ -164,26 +164,54 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
     );
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-8">
+    <main className="batch-workspace mx-auto max-w-7xl px-6 py-8 lg:py-10">
       <Link
-        className="text-sm text-slate-500 hover:text-blue-700"
+        className="text-action inline-flex items-center gap-1 text-sm transition-colors"
         href={`/projects/${projectId}`}
       >
         ← 返回 {project.name}
       </Link>
-      <div className="mt-6">
-        <p className="text-sm text-slate-500">{project.name}</p>
-        <h1 className="mt-1 text-2xl font-semibold">批量创建核查任务</h1>
+      <div className="mt-7">
+        <p className="text-sm text-slate-400">{project.name}</p>
+        <h1 className="mt-1 text-3xl font-semibold tracking-tight text-slate-950">
+          批量创建核查任务
+        </h1>
       </div>
-      <ol className="my-7 grid grid-cols-3 gap-2 text-center text-sm">
-        {["核查对象", "核查范围", "预览并创建"].map((label, index) => (
-          <li
-            key={label}
-            className={`rounded-lg px-3 py-3 ${step === index + 1 ? "bg-blue-700 text-white" : "bg-slate-200 text-slate-600"}`}
-          >
-            {index + 1} {label}
-          </li>
-        ))}
+      <ol className="batch-progress my-7 grid grid-cols-3 px-5 pt-4 text-sm sm:px-6">
+        {["核查对象", "核查范围", "预览并创建"].map((label, index) => {
+          const stepNumber = index + 1;
+          const completedStep = step > stepNumber;
+          const currentStep = step === stepNumber;
+          return (
+            <li
+              key={label}
+              aria-current={currentStep ? "step" : undefined}
+              className={`flex min-w-0 items-center gap-2 border-b-2 px-1 pb-3 transition-colors ${
+                currentStep
+                  ? "border-[var(--batch-accent)]"
+                  : "border-transparent"
+              }`}
+            >
+              <span
+                className={`shrink-0 text-xs font-semibold ${
+                  completedStep
+                    ? "text-[var(--batch-positive)]"
+                    : currentStep
+                      ? "text-slate-900"
+                      : "text-slate-400"
+                }`}
+                aria-hidden="true"
+              >
+                {completedStep ? "✓" : String(stepNumber).padStart(2, "0")}
+              </span>
+              <span
+                className={`truncate ${currentStep ? "font-semibold text-slate-900" : "text-slate-500"}`}
+              >
+                {label}
+              </span>
+            </li>
+          );
+        })}
       </ol>
 
       {error && (
@@ -193,17 +221,24 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
       )}
 
       {step === 1 && (
-        <section className="panel p-6" aria-labelledby="step-one-title">
-          <h2 id="step-one-title" className="text-lg font-semibold">
+        <section
+          className="batch-stage-surface px-5 py-6 sm:px-6 sm:py-7"
+          aria-labelledby="step-one-title"
+        >
+          <h2
+            id="step-one-title"
+            className="text-lg font-semibold text-slate-900"
+          >
             添加核查对象
           </h2>
-          <p className="mt-2 text-sm text-slate-500">
+          <p className="mt-1.5 text-sm text-slate-400">
             每行输入一个主体名称，可直接从 Excel、Word、微信等复制粘贴。
           </p>
           <label className="mt-5">
             主体名称
             <textarea
-              rows={12}
+              className="border-black/10 bg-white/45"
+              rows={10}
               autoFocus
               value={entityText}
               onChange={(event) => setEntityText(event.target.value)}
@@ -212,33 +247,39 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
               }
             />
           </label>
-          <div className="mt-3 text-sm">
+          <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm text-slate-500">
             <p>已识别 {parsed.entities.length} 个核查对象</p>
             {parsed.duplicateCount > 0 && (
-              <p className="text-amber-700">
+              <p className="text-[var(--batch-warning)]">
                 已自动去除 {parsed.duplicateCount} 个重复项
               </p>
             )}
           </div>
-          <div className="mt-6 flex justify-end">
+          <div className="mt-6 flex justify-end border-t border-slate-100 pt-5">
             <button
               className="btn primary"
               disabled={!parsed.entities.length}
               onClick={() => setStep(2)}
             >
-              下一步：核查范围
+              下一步
             </button>
           </div>
         </section>
       )}
 
       {step === 2 && (
-        <div className="grid gap-6 lg:grid-cols-[1fr_250px]">
-          <section className="panel p-6" aria-labelledby="step-two-title">
-            <h2 id="step-two-title" className="text-lg font-semibold">
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_260px]">
+          <section
+            className="batch-stage-surface px-5 py-6 sm:px-6 sm:py-7"
+            aria-labelledby="step-two-title"
+          >
+            <h2
+              id="step-two-title"
+              className="text-lg font-semibold text-slate-900"
+            >
               核查事项 × 数据来源
             </h2>
-            <p className="mt-2 text-sm text-slate-500">
+            <p className="mt-1.5 text-sm text-slate-400">
               未预填的网址需在继续前补充。系统不会从历史核查任务自动填写网址。
             </p>
             {categories.map((category) => {
@@ -247,13 +288,15 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
               );
               if (!rows.length) return null;
               return (
-                <fieldset key={category} className="mt-6">
-                  <legend className="font-semibold">{category}</legend>
-                  <div className="mt-2 space-y-3">
+                <fieldset key={category} className="mt-7">
+                  <legend className="text-sm font-semibold text-slate-800">
+                    {category}
+                  </legend>
+                  <div className="mt-2.5 space-y-2.5">
                     {rows.map((scope) => (
                       <div
                         key={scope.id}
-                        className="rounded-lg border border-slate-200 p-4"
+                        className="border-t border-black/7 px-1 py-3 first:border-t-0"
                       >
                         <label className="flex items-start gap-3">
                           <input
@@ -280,6 +323,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                           <label className="mt-3 text-xs">
                             网站 URL *
                             <input
+                              className="border-black/10 bg-white/45"
                               type="url"
                               placeholder="https://"
                               value={scope.sourceUrl}
@@ -290,7 +334,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                               }
                             />
                             {!scope.sourceUrl.trim() && (
-                              <span className="block text-xs font-normal text-amber-700">
+                              <span className="block text-xs font-normal text-[var(--batch-warning)]">
                                 需补充网站 URL
                               </span>
                             )}
@@ -304,14 +348,14 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
             })}
 
             <button
-              className="btn mt-6"
+              className="btn mt-6 ghost"
               onClick={() => setAddingTemporary((value) => !value)}
             >
               ＋ 添加临时数据来源
             </button>
             {addingTemporary && (
               <form
-                className="mt-4 grid gap-3 rounded-lg bg-slate-50 p-4 md:grid-cols-3"
+                className="document-surface mt-4 grid gap-3 border border-black/8 p-4 md:grid-cols-3"
                 onSubmit={(event) => {
                   event.preventDefault();
                   const form = new FormData(event.currentTarget);
@@ -340,7 +384,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                   核查事项 *<input name="topic" required />
                 </label>
                 <label>
-                  网站名称 *<input name="source_name" required />
+                  数据来源名称 *<input name="source_name" required />
                 </label>
                 <label>
                   网站 URL *
@@ -363,13 +407,13 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
               .map((scope) => (
                 <div
                   key={scope.id}
-                  className="mt-3 flex items-center justify-between rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm"
+                  className="mt-3 flex items-center justify-between rounded-lg border border-black/8 bg-white/30 p-3 text-sm"
                 >
                   <span>
                     {scope.topic} → {scope.sourceName} · {scope.sourceUrl}
                   </span>
                   <button
-                    className="ml-3 text-red-700"
+                    className="ml-3 text-[var(--batch-danger)]"
                     onClick={() => {
                       setScopes((current) =>
                         current.filter((item) => item.id !== scope.id),
@@ -386,11 +430,11 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                 </div>
               ))}
             {invalidScopes.length > 0 && (
-              <p className="mt-4 text-sm text-amber-700">
+              <p className="mt-4 text-sm text-[var(--batch-warning)]">
                 还有 {invalidScopes.length} 个已选范围缺少有效 URL。
               </p>
             )}
-            <div className="mt-7 flex justify-between gap-3">
+            <div className="mt-7 flex justify-between gap-3 border-t border-slate-100 pt-5">
               <button className="btn" onClick={() => setStep(1)}>
                 上一步
               </button>
@@ -403,12 +447,12 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
               >
                 {busy
                   ? "正在读取最新任务…"
-                  : `下一步：预览 ${expectedCount} 个候选任务`}
+                  : `预览并创建 · ${expectedCount} 项`}
               </button>
             </div>
           </section>
-          <aside className="panel h-fit p-5 lg:sticky lg:top-6">
-            <h2 className="font-semibold">本次任务</h2>
+          <aside className="surface-subtle h-fit p-5 lg:sticky lg:top-6">
+            <h2 className="font-semibold text-slate-900">本次任务</h2>
             <dl className="mt-4 space-y-3 text-sm">
               <div className="flex justify-between">
                 <dt>核查对象</dt>
@@ -428,22 +472,30 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
       )}
 
       {step === 3 && (
-        <section aria-labelledby="step-three-title">
-          <div className="panel flex flex-wrap gap-8 p-5 text-sm">
+        <section
+          className="batch-stage-surface p-5 sm:p-6"
+          aria-labelledby="step-three-title"
+        >
+          <h2 id="step-three-title" className="sr-only">
+            预览并创建
+          </h2>
+          <div className="flex flex-wrap gap-8 border-y border-black/8 px-1 py-4 text-sm">
             <span>
               候选任务 <b className="ml-2 text-lg">{candidates.length}</b>
             </span>
             <span>
               待创建{" "}
-              <b className="ml-2 text-lg text-blue-700">{pending.length}</b>
+              <b className="ml-2 text-lg text-[var(--batch-accent)]">
+                {pending.length}
+              </b>
             </span>
             <span>
               已存在 <b className="ml-2 text-lg text-slate-500">{found}</b>
             </span>
           </div>
-          <div className="panel mt-5 overflow-x-auto">
+          <div className="list-surface mt-4 overflow-x-auto">
             <table className="w-full min-w-[900px]">
-              <thead className="border-b border-slate-200 bg-slate-50">
+              <thead className="border-b border-black/8 bg-black/[0.025]">
                 <tr>
                   <th>核查对象</th>
                   <th>核查事项</th>
@@ -499,7 +551,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                     <td>
                       {candidate.availability === "pending" ? (
                         <button
-                          className="text-red-700"
+                          className="text-[var(--batch-danger)]"
                           onClick={() =>
                             setCandidates((current) =>
                               current.filter(
@@ -527,7 +579,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
           {invalidCandidates && (
             <p className="error mt-4">请修正待创建任务中的无效 HTTP(S) URL。</p>
           )}
-          <div className="mt-6 flex justify-between gap-3">
+          <div className="mt-6 flex justify-between gap-3 border-t border-slate-200/70 pt-5">
             <button className="btn" disabled={busy} onClick={() => setStep(2)}>
               上一步
             </button>

@@ -280,7 +280,7 @@ export function ProjectReportDialog({
           {draftError}
         </p>
       )}
-      <section className="mt-6">
+      <section className="tech-glass-panel mt-6 p-5 sm:p-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="flex flex-wrap items-center gap-3">
@@ -339,7 +339,7 @@ export function ProjectReportDialog({
           </div>
         </div>
         {sections ? (
-          <div className="mt-6 divide-y divide-slate-100 rounded-xl bg-slate-50/70 px-5">
+          <div className="ai-editor-surface mt-6 divide-y divide-slate-100 px-5">
             {ANALYSIS_SECTION_KEYS.map((key, index) => (
               <label key={key} className="block space-y-3 py-5">
                 <span className="flex items-baseline gap-3">
@@ -366,7 +366,7 @@ export function ProjectReportDialog({
             ))}
           </div>
         ) : (
-          <div className="mt-6 rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-6 py-10 text-center">
+          <div className="ai-editor-surface mt-6 border-dashed px-6 py-10 text-center">
             <p className="text-sm text-slate-500">
               {draftBusy === "load"
                 ? "正在读取已保存的分析草稿…"

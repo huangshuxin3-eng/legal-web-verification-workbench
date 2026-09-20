@@ -3,19 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>非诉网核留痕</title>
+    <title>非诉网核 · 网页核查助手</title>
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
     <main>
-      <header>
-        <p class="eyebrow">LEGAL WEB CHECK</p>
-        <h1>非诉网核留痕</h1>
+      <header class="product-header">
+        <p class="product-name">非诉网核</p>
+        <h1>网页核查助手</h1>
       </header>
-      <section id="login" hidden>
-        <h2>登录</h2>
-        <p>使用与网核工作台相同的 Supabase 账号。</p>
-        <form id="login-form">
+
+      <section id="login" class="surface login-surface" hidden>
+        <h2>登录工作台</h2>
+        <p class="section-helper">使用与非诉网核工作台相同的账号。</p>
+        <form id="login-form" class="stack-form">
           <label
             >邮箱<input
               name="email"
@@ -28,107 +29,163 @@
               type="password"
               autocomplete="current-password"
               required /></label
-          ><button>登录</button>
+          ><button class="primary">登录</button>
         </form>
       </section>
-      <section id="app" hidden>
+
+      <section id="app" class="app-shell" hidden>
         <div class="user-row">
           <span id="user"></span><button id="logout" class="link">退出</button>
         </div>
-        <label
-          >Project<select id="project">
-            <option value="">请选择项目</option>
-          </select></label
-        >
-        <div class="task-field">
-          <label for="task-search">Task</label>
-          <input id="task" type="hidden" />
-          <input
-            id="task-search"
-            type="search"
-            placeholder="搜索核查对象、事项或网站"
-            role="combobox"
-            aria-controls="task-options"
-            aria-expanded="false"
-            autocomplete="off"
-            disabled
-          />
-          <div id="selected-task" class="selected-task muted">请选择 Task</div>
-          <div
-            id="task-options"
-            class="task-options"
-            role="listbox"
-            hidden
-          ></div>
-        </div>
-        <p id="task-site" class="muted"></p>
+
+        <section class="surface selection-surface" aria-label="选择核查任务">
+          <label
+            >项目<select id="project">
+              <option value="">请选择项目</option>
+            </select></label
+          >
+          <div class="task-field">
+            <label for="task-search">核查任务</label>
+            <input id="task" type="hidden" />
+            <input
+              id="task-search"
+              type="search"
+              placeholder="搜索核查对象、事项或数据来源"
+              role="combobox"
+              aria-controls="task-options"
+              aria-expanded="false"
+              autocomplete="off"
+              disabled
+            />
+            <div id="selected-task" class="selected-task muted">
+              请选择核查任务
+            </div>
+            <div
+              id="task-options"
+              class="task-options"
+              role="listbox"
+              hidden
+            ></div>
+          </div>
+        </section>
+
+        <section id="current-check" class="current-check" hidden>
+          <p class="section-kicker">当前核查</p>
+          <strong id="current-check-entity" class="current-check-entity"></strong>
+          <p id="current-check-scope" class="current-check-scope"></p>
+          <div class="current-query">
+            <span>检索词</span>
+            <strong id="current-check-query"></strong>
+          </div>
+        </section>
+
         <section id="automation-ready" class="automation-panel" hidden>
-          <p class="automation-eyebrow">自动核查</p>
-          <p class="automation-context-label">核查对象：</p>
-          <strong id="automation-ready-entity"></strong>
-          <p class="automation-context-label">检索词：</p>
-          <strong id="automation-ready-query"></strong>
-          <button id="automation-start" class="automation-start">
+          <div class="automation-heading">
+            <h2>自动核查</h2>
+            <span class="status-badge status-neutral">待开始</span>
+          </div>
+          <div class="automation-context">
+            <div>
+              <span>核查对象</span>
+              <strong id="automation-ready-entity"></strong>
+            </div>
+            <div>
+              <span>检索词</span>
+              <strong id="automation-ready-query"></strong>
+            </div>
+          </div>
+          <p id="automation-ready-scope" class="automation-scope"></p>
+          <button id="automation-start" class="automation-start primary">
             开始自动核查
           </button>
         </section>
+
         <section id="automation-panel" class="automation-panel" hidden>
-          <p class="automation-eyebrow">自动核查</p>
-          <p class="automation-context-label">核查对象：</p>
-          <strong id="automation-entity"></strong>
-          <p class="automation-context-label">检索词：</p>
-          <strong id="automation-query-text"></strong>
-          <p id="automation-scope" class="muted"></p>
-          <p class="automation-status-label">状态：</p>
-          <p id="automation-status" class="automation-status"></p>
+          <div class="automation-heading">
+            <h2>自动核查</h2>
+            <p id="automation-status" class="status-badge status-neutral"></p>
+          </div>
+          <div class="automation-context compact">
+            <div>
+              <span>核查对象</span>
+              <strong id="automation-entity"></strong>
+            </div>
+            <div>
+              <span>检索词</span>
+              <strong id="automation-query-text"></strong>
+            </div>
+          </div>
+          <p id="automation-scope" class="automation-scope"></p>
+
           <div id="automation-verification" class="notice" hidden>
             <strong>需要人工验证</strong>
             <p>
               网站要求完成安全验证。请在网页中完成滑块验证；如果页面已经显示「验证已通过，正在查询…」，说明验证已经完成，等结果出现后直接点击下方按钮即可，不需要再做一次验证。
             </p>
           </div>
-          <div id="automation-result" class="automation-result" hidden></div>
+
+          <div id="automation-result-shell" class="info-surface" hidden>
+            <p id="automation-result-label" class="info-label">状态说明</p>
+            <div id="automation-result" class="automation-result"></div>
+          </div>
           <div
-            id="automation-resume-block"
-            class="automation-result"
+            id="automation-resume-shell"
+            class="info-surface progress-surface"
             hidden
-          ></div>
-          <button id="automation-resume" class="primary" hidden>
-            继续剩余分页核查
-          </button>
-          <button id="automation-continue" class="primary" hidden>
-            验证完成，继续
-          </button>
+          >
+            <p class="info-label">进度</p>
+            <div id="automation-resume-block" class="automation-result"></div>
+          </div>
+          <div id="automation-next" class="automation-next" hidden>
+            <p class="info-label">下一步</p>
+            <button id="automation-resume" class="primary" hidden>
+              继续核查
+            </button>
+            <button id="automation-continue" class="primary" hidden>
+              验证完成，继续
+            </button>
+          </div>
           <button id="automation-dismiss" class="link" hidden>
             返回手工模式
           </button>
         </section>
-        <label
-          >Query（手工流程）<select id="query" disabled>
-            <option value="">请选择 Query</option>
-          </select></label
-        >
-        <p class="muted">当前 Query 仅用于手工留痕，不控制自动核查。</p>
-        <p id="no-query" class="notice" hidden>
-          手工留痕请先在网核工作台创建 Query；自动核查无需预先创建。
-        </p>
-        <div class="url-card">
-          <span>当前网页 URL</span>
-          <p id="current-url">正在读取…</p>
-          <button id="refresh-url" class="link">刷新 URL</button>
-        </div>
-        <p>当前留痕数量：<strong id="count">—</strong></p>
-        <p class="debug-note">
-          生成完整 PDF 留痕时，Chrome
-          会短暂显示页面正在被扩展调试的提示；生成完成后将立即解除。
-        </p>
-        <button id="archive" class="primary" disabled>留痕并归档</button
-        ><button id="cancel" hidden>取消留痕</button>
-        <div id="success" class="success" hidden>
-          <strong>✓ 留痕已归档</strong>
-          <p id="filename"></p>
-          <button id="view" class="link">查看留痕</button>
-        </div>
+
+        <section class="surface manual-section" aria-label="手工留痕">
+          <div class="section-heading">
+            <h2>手工留痕</h2>
+            <span>可选</span>
+          </div>
+          <label
+            >检索批次<select id="query" disabled>
+              <option value="">请选择检索批次</option>
+            </select></label
+          >
+          <p class="muted">
+            当前检索批次仅用于手工留痕，不控制自动核查。
+          </p>
+          <p id="no-query" class="notice" hidden>
+            手工留痕请先在非诉网核工作台创建检索批次；自动核查无需预先创建。
+          </p>
+          <div class="url-card">
+            <span>当前网页 URL</span>
+            <p id="current-url">正在读取…</p>
+            <button id="refresh-url" class="link">刷新 URL</button>
+          </div>
+          <p class="capture-count">
+            当前证据留痕：<strong id="count">—</strong> 份
+          </p>
+          <p class="debug-note">
+            生成完整 PDF 留痕时，Chrome
+            会短暂显示页面正在被扩展调试的提示；生成完成后将立即解除。
+          </p>
+          <button id="archive" class="primary" disabled>留痕并归档</button
+          ><button id="cancel" class="secondary" hidden>取消留痕</button>
+          <div id="success" class="success" hidden>
+            <strong>✓ 证据留痕已归档</strong>
+            <p id="filename"></p>
+            <button id="view" class="link">查看证据留痕</button>
+          </div>
+        </section>
       </section>
       <p id="status" role="status"></p>
       <p id="error" role="alert"></p>

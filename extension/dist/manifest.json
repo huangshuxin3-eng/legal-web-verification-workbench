@@ -1,6 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "非诉网核工作台",
+  "name": "非诉网核 · 网页核查助手",
+  "short_name": "网页核查助手",
   "version": "8.1.0",
   "minimum_chrome_version": "118",
   "description": "生成完整 PDF 留痕，并对中国执行信息公开网执行 Task 提供人工验证辅助核查。",
@@ -12,7 +13,7 @@
     "tabs"
   ],
   "action": {
-    "default_title": "打开非诉网核留痕面板"
+    "default_title": "非诉网核 · 网页核查助手"
   },
   "background": {
     "service_worker": "worker.mjs",
