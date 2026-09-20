@@ -57,14 +57,13 @@ export function TaskBatchDeleteDialog({
   return (
     <Dialog title="批量永久删除任务" onClose={onClose} busy={busy}>
       <p className="text-sm leading-6">
-        相关 Task、Query、留痕记录及对应 Private Storage
-        文件将永久删除，无法恢复。
+        相关核查任务、检索批次、证据留痕及对应私有文件将永久删除，无法恢复。
       </p>
       <dl className="my-5 rounded-lg bg-red-50 p-4 text-sm">
         {[
-          ["Task 数量", tasks.length],
-          ["Query 总数量", queryCount],
-          ["留痕总数量", captureCount],
+          ["核查任务", tasks.length],
+          ["检索批次", queryCount],
+          ["证据留痕", captureCount],
         ].map(([label, count]) => (
           <div key={label} className="mt-2 flex justify-between first:mt-0">
             <dt>{label}</dt>

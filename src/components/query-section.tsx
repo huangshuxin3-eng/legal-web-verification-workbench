@@ -95,7 +95,7 @@ export function QuerySection({
         await refresh();
       } catch {
         setError(
-          "操作已保存，但列表刷新失败。请点击“刷新查询”，不要重复提交。",
+          "操作已保存，但列表刷新失败。请点击“刷新检索批次”，不要重复提交。",
         );
       }
     } catch (error) {
@@ -114,10 +114,10 @@ export function QuerySection({
   return (
     <section
       className="mt-8 border-t border-slate-200 pt-6"
-      aria-label="查询记录"
+      aria-label="检索批次"
     >
       <div className="flex items-center justify-between gap-2">
-        <h2 className="font-semibold">查询记录</h2>
+        <h2 className="font-semibold">检索批次</h2>
         <button
           type="button"
           className="btn"
@@ -129,7 +129,7 @@ export function QuerySection({
             setError("");
           }}
         >
-          ＋ 新增查询
+          ＋ 新增检索词
         </button>
       </div>
       {error && (
@@ -140,7 +140,7 @@ export function QuerySection({
             disabled={busy || loading}
             onClick={load}
           >
-            刷新查询
+            刷新检索批次
           </button>
         </div>
       )}
@@ -156,7 +156,7 @@ export function QuerySection({
             e.preventDefault();
             const content = text.trim();
             if (!content) {
-              setError("请填写查询内容，不能只输入空格。");
+              setError("请填写检索词，不能只输入空格。");
               return;
             }
             void mutate(
@@ -184,13 +184,13 @@ export function QuerySection({
                       ),
                 );
               },
-              editor === "new" ? "查询已新增。" : "查询已更新。",
+              editor === "new" ? "检索词已新增。" : "检索词已更新。",
             );
           }}
         >
           <label>
             {editor === "new"
-              ? "查询内容 / 查询条件"
+              ? "检索词 / 检索条件"
               : `编辑 ${queryLabel(editor.query_no)}`}
             <textarea
               required
@@ -215,14 +215,14 @@ export function QuerySection({
               取消
             </button>
             <button className="btn primary" disabled={busy}>
-              {busy ? "保存中…" : "保存查询"}
+              {busy ? "保存中…" : "保存检索词"}
             </button>
           </div>
         </form>
       )}
       {loading ? (
         <p role="status" className="py-6 text-sm text-slate-500">
-          正在加载查询…
+          正在加载检索批次…
         </p>
       ) : (
         <div className="mt-4 space-y-3">
@@ -278,7 +278,7 @@ export function QuerySection({
                 >
                   <p className="text-sm">
                     确定删除 {queryLabel(query.query_no)}
-                    ？将一并删除该查询的所有留痕文件，删除后无法恢复，此编号不会复用。
+                    ？将一并删除该检索批次的所有证据留痕，删除后无法恢复，此编号不会复用。
                   </p>
                   <div className="mt-3 flex gap-2">
                     <button
@@ -299,7 +299,7 @@ export function QuerySection({
                           setQueries((previous) =>
                             previous.filter((q) => q.id !== query.id),
                           );
-                        }, "查询已删除。")
+                        }, "检索批次已删除。")
                       }
                     >
                       {busy ? "删除中…" : "确认删除"}
@@ -321,7 +321,7 @@ export function QuerySection({
           ))}
           {!queries.length && !error && (
             <p className="py-4 text-sm text-slate-500">
-              还没有查询记录，点击“新增查询”记录具体查询条件。
+              还没有检索批次，点击“新增检索词”记录具体检索条件。
             </p>
           )}
         </div>

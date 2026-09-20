@@ -134,17 +134,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       key={session.user.id}
       value={{ db, userId: session.user.id }}
     >
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-6 py-4">
-          <Link href="/" className="font-semibold">
+      <header className="border-b border-slate-200/80 bg-white/90 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-6 py-3.5">
+          <Link
+            href="/"
+            className="text-sm font-semibold tracking-tight text-slate-900"
+          >
             非诉网核工作台
           </Link>
-          <div className="flex items-center gap-4">
-            <span className="hidden text-xs text-slate-500 sm:inline">
+          <div className="flex items-center gap-2">
+            <span className="hidden max-w-64 truncate text-xs text-slate-400 sm:inline">
               {session.user.email}
             </span>
             <button
-              className="text-sm text-slate-600"
+              className="btn ghost h-8 px-3 text-xs text-slate-500"
               disabled={busy}
               onClick={async () => {
                 setBusy(true);

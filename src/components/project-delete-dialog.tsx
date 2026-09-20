@@ -49,14 +49,13 @@ export function ProjectDeleteDialog({
   return (
     <Dialog title="永久删除项目" onClose={onClose} busy={busy}>
       <p className="text-sm leading-6">
-        删除后，该项目及其全部
-        Task、Query、留痕记录和对应私有文件将永久删除，无法恢复。
+        删除后，该项目及其全部核查任务、检索批次、证据留痕和对应私有文件将永久删除，无法恢复。
       </p>
       <dl className="my-5 rounded-lg bg-red-50 p-4 text-sm">
         {[
-          ["Task 数量", counts.tasks],
-          ["Query 数量", counts.queries],
-          ["留痕数量", counts.captures],
+          ["核查任务", counts.tasks],
+          ["检索批次", counts.queries],
+          ["证据留痕", counts.captures],
         ].map(([label, count]) => (
           <div key={label} className="mt-2 flex first:mt-0 justify-between">
             <dt>{label}</dt>

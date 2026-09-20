@@ -337,11 +337,11 @@ test("Workbench 提供导出入口、真实统计、空项目提示和防重复�
       "utf8",
     ),
   ]);
-  assert.match(workspace, />\s*导出网核成果\s*</);
-  assert.match(dialog, /核查对象数量/);
-  assert.match(dialog, /有底稿的 Task 数量/);
-  assert.match(dialog, /Capture \/ 底稿文件数量/);
-  assert.match(dialog, /当前项目暂无可导出的底稿/);
+  assert.match(workspace, />\s*导出成果\s*</);
+  assert.match(dialog, /\["核查对象", entityCount\]/);
+  assert.match(dialog, /\["核查任务", taskCount\]/);
+  assert.match(dialog, /\["证据留痕", captureCount\]/);
+  assert.match(dialog, /当前项目暂无可导出的证据留痕/);
   assert.match(dialog, /if \(lock\.current \|\| !captureCount\) return/);
   assert.match(dialog, /disabled=\{busy \|\| !captureCount\}/);
 });

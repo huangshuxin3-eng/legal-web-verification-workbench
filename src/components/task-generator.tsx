@@ -173,7 +173,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
       </Link>
       <div className="mt-6">
         <p className="text-sm text-slate-500">{project.name}</p>
-        <h1 className="mt-1 text-2xl font-semibold">批量生成核查任务</h1>
+        <h1 className="mt-1 text-2xl font-semibold">批量创建核查任务</h1>
       </div>
       <ol className="my-7 grid grid-cols-3 gap-2 text-center text-sm">
         {["核查对象", "核查范围", "预览并创建"].map((label, index) => (
@@ -236,10 +236,10 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
         <div className="grid gap-6 lg:grid-cols-[1fr_250px]">
           <section className="panel p-6" aria-labelledby="step-two-title">
             <h2 id="step-two-title" className="text-lg font-semibold">
-              核查事项 × 核查网站
+              核查事项 × 数据来源
             </h2>
             <p className="mt-2 text-sm text-slate-500">
-              未预填的网址需在继续前补充。系统不会从历史 Task 自动填写网址。
+              未预填的网址需在继续前补充。系统不会从历史核查任务自动填写网址。
             </p>
             {categories.map((category) => {
               const rows = scopes.filter(
@@ -307,7 +307,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
               className="btn mt-6"
               onClick={() => setAddingTemporary((value) => !value)}
             >
-              ＋ 添加临时核查网站
+              ＋ 添加临时数据来源
             </button>
             {addingTemporary && (
               <form
@@ -322,7 +322,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                   const sourceUrl = String(form.get("source_url") ?? "").trim();
                   if (!topic || !sourceName || !safeWebsite(sourceUrl)) {
                     setError(
-                      "临时核查网站的事项、名称和 HTTP(S) URL 均须有效。",
+                      "临时数据来源的事项、名称和 HTTP(S) URL 均须有效。",
                     );
                     return;
                   }
@@ -419,7 +419,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                 <dd>{selectedScopes.length}</dd>
               </div>
               <div className="flex justify-between border-t pt-3 font-semibold">
-                <dt>预计生成 Task</dt>
+                <dt>预计生成核查任务</dt>
                 <dd>{expectedCount}</dd>
               </div>
             </dl>
@@ -447,7 +447,7 @@ export function TaskGenerator({ projectId }: { projectId: string }) {
                 <tr>
                   <th>核查对象</th>
                   <th>核查事项</th>
-                  <th>核查网站</th>
+                  <th>数据来源</th>
                   <th>网站 URL</th>
                   <th>状态</th>
                   <th>操作</th>

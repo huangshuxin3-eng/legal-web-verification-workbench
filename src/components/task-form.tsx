@@ -21,12 +21,40 @@ export function TaskForm({
   const [error, setError] = useState("");
   return (
     <Dialog
-      title={task ? "编辑 Task" : "新增 Task"}
+      title={task ? "编辑核查任务" : "新建核查任务"}
       onClose={onClose}
       busy={busy}
+      formLayout
+      footer={
+        <div className="flex justify-end gap-3">
+          <button
+            type="button"
+            className="btn"
+            disabled={busy}
+            onClick={onClose}
+          >
+            取消
+          </button>
+          <button
+            className="btn primary"
+            type="submit"
+            form="task-form"
+            disabled={busy}
+          >
+            {busy
+              ? task
+                ? "保存中…"
+                : "创建中…"
+              : task
+                ? "保存修改"
+                : "创建核查任务"}
+          </button>
+        </div>
+      }
     >
       <form
-        className="space-y-5"
+        id="task-form"
+        className="space-y-6"
         onSubmit={async (e) => {
           e.preventDefault();
           if (busy) return;
@@ -60,6 +88,7 @@ export function TaskForm({
         <label>
           核查对象 *
           <input
+            className="h-12"
             name="entity_name"
             defaultValue={task?.entity_name}
             required
@@ -67,15 +96,27 @@ export function TaskForm({
           />
         </label>
         <label>
-          核查事项 *<input name="topic" defaultValue={task?.topic} required />
-        </label>
-        <label>
-          核查网站 *
-          <input name="source_name" defaultValue={task?.source_name} required />
-        </label>
-        <label>
-          网站网址 *
+          核查事项 *
           <input
+            className="h-12"
+            name="topic"
+            defaultValue={task?.topic}
+            required
+          />
+        </label>
+        <label>
+          数据来源 *
+          <input
+            className="h-12"
+            name="source_name"
+            defaultValue={task?.source_name}
+            required
+          />
+        </label>
+        <label>
+          网站地址
+          <input
+            className="h-12"
             name="source_url"
             type="url"
             placeholder="https://"
@@ -84,13 +125,18 @@ export function TaskForm({
           />
         </label>
         <label>
-          备注
-          <textarea name="note" rows={3} defaultValue={task?.note ?? ""} />
+          备注（可选）
+          <textarea
+            className="min-h-[120px]"
+            name="note"
+            rows={4}
+            defaultValue={task?.note ?? ""}
+          />
         </label>
         {task && (
           <label>
             状态
-            <select name="status" defaultValue={task.status}>
+            <select className="h-12" name="status" defaultValue={task.status}>
               {Object.entries(statusLabels).map(([value, label]) => (
                 <option value={value} key={value}>
                   {label}
@@ -104,19 +150,6 @@ export function TaskForm({
             {error}
           </p>
         )}
-        <div className="flex justify-end gap-3">
-          <button
-            type="button"
-            className="btn"
-            disabled={busy}
-            onClick={onClose}
-          >
-            取消
-          </button>
-          <button className="btn primary" disabled={busy}>
-            {busy ? "保存中…" : "保存"}
-          </button>
-        </div>
       </form>
     </Dialog>
   );

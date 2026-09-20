@@ -61,7 +61,7 @@ export function CaptureSection({
     let active = true;
     void load()
       .catch(() => {
-        if (active) setError("留痕列表加载失败，请重试。");
+        if (active) setError("证据留痕列表加载失败，请重试。");
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -120,22 +120,22 @@ export function CaptureSection({
   return (
     <section
       className="mt-4 border-t border-slate-100 pt-4"
-      aria-label="留痕管理"
+      aria-label="证据留痕管理"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs text-slate-600">
-          留痕 {query.captures[0]?.count ?? 0} 份
+          证据留痕 {query.captures[0]?.count ?? 0} 份
         </span>
         <button
           className="text-sm text-blue-700"
           disabled={disabled || loading || adding || !!recovery}
           onClick={() => setAdding(true)}
         >
-          ＋ 添加留痕
+          ＋ 添加证据留痕
         </button>
       </div>
       {(query.captures[0]?.count ?? 0) === 0 && (
-        <p className="mt-2 text-xs text-amber-700">此查询尚未留痕。</p>
+        <p className="mt-2 text-xs text-amber-700">此检索批次尚无证据留痕。</p>
       )}
       {error && (
         <p className="error mt-3" role="alert">
@@ -156,8 +156,8 @@ export function CaptureSection({
           >
             <p>
               {operation.action === "delete"
-                ? "留痕删除尚未完成"
-                : "留痕上传尚未完成"}
+                ? "证据留痕删除尚未完成"
+                : "证据留痕上传尚未完成"}
               （编号 {captureLabel(operation.capture_no)}）。
             </p>
             <div className="mt-2 flex flex-wrap gap-3">
@@ -240,7 +240,7 @@ export function CaptureSection({
             })
           }
         >
-          刷新留痕与统计
+          刷新证据留痕与统计
         </button>
       )}
       {adding && (
@@ -255,7 +255,7 @@ export function CaptureSection({
               !file.size ||
               file.size > MAX_CAPTURE_BYTES
             ) {
-              setError("请选择不超过 20 MB 的 PDF、PNG 或 JPG 留痕文件。");
+              setError("请选择不超过 20 MB 的 PDF、PNG 或 JPG 证据文件。");
               return;
             }
             const sourceUrl = String(form.get("source_url") ?? "").trim();
@@ -272,11 +272,11 @@ export function CaptureSection({
               const saved = (await response.json()) as Capture;
               setCaptures((previous) => [...previous, saved]);
               setRecovery(null);
-            }, "留痕已上传。");
+            }, "证据留痕已上传。");
           }}
         >
           <label>
-            留痕文件（PDF/PNG/JPG，最多 20 MB）
+            证据文件（PDF/PNG/JPG，最多 20 MB）
             <input
               name="file"
               type="file"
@@ -299,7 +299,7 @@ export function CaptureSection({
               className="btn primary"
               disabled={disabled || busy || !!recovery}
             >
-              {busy ? "上传中…" : "上传留痕"}
+              {busy ? "上传中…" : "上传证据留痕"}
             </button>
             <button
               type="button"
@@ -314,79 +314,82 @@ export function CaptureSection({
       )}
       {loading ? (
         <p className="mt-3 text-xs text-slate-500" role="status">
-          正在加载留痕…
+          正在加载证据留痕…
         </p>
       ) : (
-        <ul className="mt-3 space-y-3">
+        <ul className="mt-3 divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200 bg-white">
           {captures.map((capture) => (
-            <li
-              key={capture.id}
-              className="rounded-lg border border-slate-200 p-3"
-            >
-              <p className="text-xs font-semibold">
-                {captureLabel(capture.capture_no)}
-              </p>
-              <p className="mt-1 break-all text-xs">{filename(capture)}</p>
-              <time
-                dateTime={capture.created_at}
-                className="mt-1 block text-xs text-slate-500"
-              >
-                {dateLabel(capture.created_at)}
-              </time>
-              <div className="mt-2 flex gap-4 text-xs">
-                <button
-                  className="text-blue-700"
-                  disabled={disabled}
-                  onClick={() =>
-                    void action(async () => {
-                      const response = await captureRequest(
-                        db,
-                        `/api/captures/${capture.id}`,
-                      );
-                      setPreview({
-                        url: URL.createObjectURL(await response.blob()),
-                        name: filename(capture),
-                      });
-                    })
-                  }
-                >
-                  预览
-                </button>
-                <button
-                  className="text-blue-700"
-                  disabled={disabled}
-                  onClick={() =>
-                    void action(async () => {
-                      const response = await captureRequest(
-                        db,
-                        `/api/captures/${capture.id}?download=1`,
-                      );
-                      const url = URL.createObjectURL(await response.blob());
-                      const link = document.createElement("a");
-                      link.href = url;
-                      link.download = filename(capture);
-                      document.body.append(link);
-                      link.click();
-                      link.remove();
-                      setTimeout(() => URL.revokeObjectURL(url), 60000);
-                    })
-                  }
-                >
-                  下载
-                </button>
-                <button
-                  className="text-red-700"
-                  disabled={disabled}
-                  onClick={() => setDeleting(capture.id)}
-                >
-                  删除
-                </button>
+            <li key={capture.id} className="px-3 py-2.5">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 shrink-0 rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
+                  {captureLabel(capture.capture_no)}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="break-all text-xs leading-5 text-slate-700">
+                    {filename(capture)}
+                  </p>
+                  <time
+                    dateTime={capture.created_at}
+                    className="mt-0.5 block text-[11px] text-slate-400"
+                  >
+                    {dateLabel(capture.created_at)}
+                  </time>
+                </div>
+                <div className="flex shrink-0 gap-3 pt-1 text-xs">
+                  <button
+                    className="text-blue-700"
+                    disabled={disabled}
+                    onClick={() =>
+                      void action(async () => {
+                        const response = await captureRequest(
+                          db,
+                          `/api/captures/${capture.id}`,
+                        );
+                        setPreview({
+                          url: URL.createObjectURL(await response.blob()),
+                          name: filename(capture),
+                        });
+                      })
+                    }
+                  >
+                    预览
+                  </button>
+                  <button
+                    className="text-blue-700"
+                    disabled={disabled}
+                    onClick={() =>
+                      void action(async () => {
+                        const response = await captureRequest(
+                          db,
+                          `/api/captures/${capture.id}?download=1`,
+                        );
+                        const url = URL.createObjectURL(await response.blob());
+                        const link = document.createElement("a");
+                        link.href = url;
+                        link.download = filename(capture);
+                        document.body.append(link);
+                        link.click();
+                        link.remove();
+                        setTimeout(() => URL.revokeObjectURL(url), 60000);
+                      })
+                    }
+                  >
+                    下载
+                  </button>
+                  <button
+                    className="text-red-700"
+                    disabled={disabled}
+                    onClick={() => setDeleting(capture.id)}
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
               {deleting === capture.id && (
                 <div
-                  className="mt-3 rounded bg-red-50 p-3 text-xs"
+                  className="mt-2 rounded-md bg-red-50 p-2.5 text-xs"
                   role="group"
-                  aria-label="确认删除留痕"
+                  aria-label="确认删除证据留痕"
                 >
                   <p>
                     确定删除留痕 {captureLabel(capture.capture_no)}
@@ -413,7 +416,7 @@ export function CaptureSection({
                             previous.filter((c) => c.id !== capture.id),
                           );
                           setPreview(null);
-                        }, "留痕文件及记录已删除。")
+                        }, "证据留痕文件及记录已删除。")
                       }
                     >
                       {busy ? "删除中…" : "确认删除"}

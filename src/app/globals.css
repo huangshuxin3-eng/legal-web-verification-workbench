@@ -1,9 +1,34 @@
 @import "tailwindcss";
 
+:root {
+  --page-background: #f5f7fa;
+  --surface: #ffffff;
+  --surface-subtle: #f7f9fc;
+  --surface-sunken: #f1f4f8;
+  --text-primary: #172033;
+  --text-secondary: #526077;
+  --text-tertiary: #8792a6;
+  --border: #e3e8ef;
+  --brand: #1d4ed8;
+  --positive: #047857;
+  --warning: #b45309;
+  --danger: #b42318;
+  --focus-ring: #3b82f6;
+  --radius: 12px;
+  --shadow: 0 18px 50px rgb(15 23 42 / 10%);
+}
+
 @layer base {
   body {
-    @apply bg-slate-50 text-slate-900 antialiased;
-    font-family: Arial, "Microsoft YaHei", sans-serif;
+    @apply min-h-dvh antialiased;
+    color: var(--text-primary);
+    background-color: var(--page-background);
+    background-image: radial-gradient(
+      circle at 14% -12%,
+      rgb(219 234 254 / 55%),
+      transparent 34rem
+    );
+    font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
   }
   button,
   a,
@@ -13,41 +38,66 @@
     @apply outline-offset-4;
   }
   button {
-    @apply cursor-pointer disabled:cursor-wait disabled:opacity-50;
+    @apply cursor-pointer disabled:cursor-not-allowed disabled:opacity-50;
   }
   input,
   select,
   textarea {
-    @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm focus:border-blue-600 focus:outline-blue-600;
+    @apply w-full rounded-lg border bg-white px-3 text-sm transition-colors placeholder:text-slate-400 focus:border-blue-500 focus:outline-2 focus:outline-blue-500/25;
+    min-height: 2.5rem;
+    border-color: var(--border);
+    color: var(--text-primary);
+  }
+  textarea {
+    @apply py-2.5 leading-6;
   }
   label {
-    @apply block space-y-2 text-sm font-medium;
+    @apply block space-y-2 text-sm font-medium text-slate-700;
   }
   th {
-    @apply px-5 py-3 text-left text-xs font-medium text-slate-500;
+    @apply px-5 py-3.5 text-left text-xs font-semibold tracking-wide text-slate-500;
   }
   td {
-    @apply px-5 py-4 text-sm;
+    @apply px-5 py-4 text-sm text-slate-700;
   }
 }
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium hover:bg-slate-50;
+    @apply inline-flex h-10 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500;
   }
   .primary {
-    @apply border-blue-700 bg-blue-700 text-white hover:bg-blue-800;
+    @apply border-blue-700 bg-blue-700 text-white hover:border-blue-800 hover:bg-blue-800;
+  }
+  .ghost {
+    @apply border-transparent bg-transparent hover:border-transparent hover:bg-slate-100;
+  }
+  .danger {
+    @apply border-red-200 bg-white text-red-700 hover:border-red-300 hover:bg-red-50;
+  }
+  .icon-button {
+    @apply inline-flex size-9 items-center justify-center rounded-lg text-xl leading-none text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500;
   }
   .error {
-    @apply rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700;
+    @apply rounded-xl border border-red-200 bg-red-50/80 p-3 text-sm text-red-700;
   }
   .panel {
-    @apply rounded-xl border border-slate-200 bg-white;
+    @apply rounded-xl border bg-white;
+    border-color: var(--border);
+  }
+  .surface-subtle {
+    @apply rounded-xl border border-slate-200/80 bg-slate-50/80;
+  }
+  .status-badge {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold;
+  }
+  .eyebrow {
+    @apply text-xs font-semibold tracking-[0.14em] text-slate-500 uppercase;
   }
 }
 dialog {
-  max-height: 90dvh;
-  overflow-y: auto;
+  color: var(--text-primary);
 }
 dialog::backdrop {
-  background: rgb(15 23 42 / 35%);
+  background: rgb(15 23 42 / 28%);
+  backdrop-filter: blur(2px);
 }

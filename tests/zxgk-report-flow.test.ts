@@ -641,10 +641,10 @@ test("Workbench 提供报告入口、coarse check 与防重复提交", async () 
       "utf8",
     ),
   ]);
-  assert.match(workspace, />\s*生成尽调报告\s*</);
+  assert.match(workspace, />\s*生成报告\s*</);
   assert.match(workspace, /disabled=\{!!reportBlockedReason\}/);
   assert.match(workspace, /"当前项目没有中国执行信息公开网的执行任务"/);
-  assert.match(workspace, /"执行留痕尚未产生，请先完成网核"/);
+  assert.match(workspace, /"执行证据留痕尚未产生，请先完成网核"/);
   assert.match(workspace, /isReportTask/);
   assert.match(dialog, /\/api\/projects\/\$\{projectId\}\/report/);
   assert.match(dialog, /if \(lock\.current \|\| !captureCount\) return/);

@@ -48,18 +48,18 @@ export function TaskDeleteDialog({
   return (
     <Dialog title="永久删除任务" onClose={onClose} busy={busy}>
       <p className="text-sm leading-6">
-        删除后，该任务及其 Query、留痕记录和对应私有文件将永久删除，无法恢复。
+        删除后，该核查任务及其检索批次、证据留痕和对应私有文件将永久删除，无法恢复。
       </p>
       <p className="mt-4 break-words text-sm font-semibold">
         {task.entity_name} · {task.topic} · {task.source_name}
       </p>
       <dl className="my-5 rounded-lg bg-red-50 p-4 text-sm">
         <div className="flex justify-between">
-          <dt>Query 数量</dt>
+          <dt>检索批次</dt>
           <dd className="font-semibold">{queryCount}</dd>
         </div>
         <div className="mt-2 flex justify-between">
-          <dt>留痕数量</dt>
+          <dt>证据留痕</dt>
           <dd className="font-semibold">{task.capture_count}</dd>
         </div>
       </dl>

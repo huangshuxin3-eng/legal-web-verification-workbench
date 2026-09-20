@@ -2,15 +2,14 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-test("Task 列表展示完整项目稳定序号和查看、编辑、删除操作", async () => {
+test("核查任务列表保留稳定序号和查看、编辑、删除操作", async () => {
   const source = await readFile(
     new URL("../src/components/project-workspace.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /<th[^>]*>序号<\/th>/);
   assert.match(source, /pageTasks\.map\(\(task\)/);
   assert.match(source, /sequenceByTask\.get\(task\.id\)/);
-  for (const action of ["查看", "编辑", "删除"])
+  for (const action of ["查看详情 →", "编辑", "删除"])
     assert.match(source, new RegExp(`>\\s*${action}\\s*<\\/button>`));
 });
 
@@ -45,17 +44,17 @@ test("确认删除只移除目标 Task，并保留 Drawer 的共用删除入口"
   assert.match(drawer, /<TaskDeleteDialog/);
 });
 
-test("Task 表保留序号并仅提供当前页全选和批量确认框", async () => {
+test("核查任务表保留稳定序号并仅提供当前页全选和批量确认框", async () => {
   const source = await readFile(
     new URL("../src/components/project-workspace.tsx", import.meta.url),
     "utf8",
   );
   assert.match(source, /aria-label="选择当前页当前可见的全部任务"/);
   assert.match(source, /selectVisibleTasks\(visibleTaskIds/);
-  assert.match(source, /已选择 \{selectedTasks\.length\} 个任务/);
+  assert.match(source, /已选择 \{selectedTasks\.length\} 个核查任务/);
   assert.match(source, />\s*批量删除\s*<\/button>/);
   assert.match(source, /<TaskBatchDeleteDialog/);
-  assert.match(source, /<th[^>]*>序号<\/th>/);
+  assert.match(source, /sequenceByTask\.get\(task\.id\)/);
 });
 
 test("Task 表提供 25/50/100 分页并展示当前范围", async () => {
@@ -76,9 +75,9 @@ test("批量确认框取消不请求删除并展示聚合统计", async () => {
     new URL("../src/components/task-batch-delete-dialog.tsx", import.meta.url),
     "utf8",
   );
-  assert.match(source, /Task 数量/);
-  assert.match(source, /Query 总数量/);
-  assert.match(source, /留痕总数量/);
+  assert.match(source, /\["核查任务", tasks\.length\]/);
+  assert.match(source, /\["检索批次", queryCount\]/);
+  assert.match(source, /\["证据留痕", captureCount\]/);
   assert.match(source, /onClick=\{onClose\}/);
   assert.match(source, /永久删除 \$\{tasks\.length\} 个任务/);
 });

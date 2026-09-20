@@ -72,7 +72,7 @@ export default function ProjectsPage() {
               <tr>
                 <th>项目名称</th>
                 <th>项目编号</th>
-                <th>Task 数量</th>
+                <th>核查任务</th>
                 <th>创建时间</th>
                 <th>操作</th>
               </tr>

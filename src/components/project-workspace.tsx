@@ -173,8 +173,27 @@ export function ProjectWorkspace({
   const reportBlockedReason = reportTasks.length
     ? reportCaptureCount
       ? ""
-      : "执行留痕尚未产生，请先完成网核"
+      : "执行证据留痕尚未产生，请先完成网核"
     : "当前项目没有中国执行信息公开网的执行任务";
+  const projectStatus =
+    tasks.length > 0 && completed === tasks.length
+      ? "已完成"
+      : tasks.length > 0
+        ? "进行中"
+        : "待启动";
+  const workflowSteps = [
+    {
+      label: "核查任务",
+      detail: `${tasks.length} 项`,
+    },
+    {
+      label: "自动留痕",
+      detail: `${projectCounts.captures} 份`,
+    },
+    { label: "结果复核", detail: "人工复核" },
+    { label: "AI 分析", detail: "按需生成" },
+    { label: "生成报告", detail: "按需生成" },
+  ];
   async function save(input: TaskInput) {
     const data =
       editor === "new"
@@ -262,42 +281,64 @@ export function ProjectWorkspace({
       </main>
     );
   return (
-    <main className="mx-auto max-w-7xl px-6 py-8">
-      <Link className="text-sm text-slate-500 hover:text-blue-700" href="/">
+    <main className="mx-auto max-w-7xl px-6 py-8 lg:py-10">
+      <Link
+        className="inline-flex items-center gap-1 text-sm text-slate-500 transition-colors hover:text-blue-700"
+        href="/"
+      >
         ← 我的项目
       </Link>
-      <div className="mt-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="break-words text-2xl font-semibold">{project.name}</h1>
-          <p className="mt-2 text-sm text-slate-500">
-            项目编号：{project.code || "未填写"}
+      <div className="mt-7 flex flex-wrap items-start justify-between gap-6">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="break-words text-3xl font-semibold tracking-tight text-slate-950">
+              {project.name}
+            </h1>
+            <span
+              className={`status-badge ${
+                projectStatus === "已完成"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                  : projectStatus === "进行中"
+                    ? "border-blue-200 bg-blue-50 text-blue-700"
+                    : "border-slate-200 bg-slate-100 text-slate-600"
+              }`}
+            >
+              <span aria-hidden="true">●</span>
+              {projectStatus}
+            </span>
+          </div>
+          <p className="mt-3 text-sm text-slate-500">
+            法律网核与尽调 · {tasks.length} 个核查任务 ·{" "}
+            {projectCounts.captures} 份证据留痕
           </p>
+          {project.code && (
+            <p className="mt-1 text-xs text-slate-400">
+              项目编号 {project.code}
+            </p>
+          )}
         </div>
-        <div className="flex flex-wrap gap-3">
+        <div className="flex max-w-xl flex-wrap justify-end gap-2">
+          <button
+            className="btn primary"
+            onClick={() => setEditor("new")}
+            disabled={!!pending}
+          >
+            <span aria-hidden="true">＋</span> 新建核查任务
+          </button>
+          <Link className="btn" href={`/projects/${projectId}/tasks/generate`}>
+            批量创建
+          </Link>
           <button
             className="btn"
             disabled={!!reportBlockedReason}
             title={reportBlockedReason || undefined}
             onClick={() => setReportOpen(true)}
           >
-            生成尽调报告
-          </button>
-          <button className="btn" onClick={() => setExportOpen(true)}>
-            导出网核成果
-          </button>
-          <Link className="btn" href={`/projects/${projectId}/tasks/generate`}>
-            批量生成任务
-          </Link>
-          <button
-            className="btn primary"
-            onClick={() => setEditor("new")}
-            disabled={!!pending}
-          >
-            ＋ 新增 Task
+            生成报告
           </button>
           <div className="relative">
             <button
-              className="btn"
+              className="btn w-10 px-0 text-lg"
               aria-label="项目操作"
               aria-expanded={projectMenu}
               onClick={() => setProjectMenu((open) => !open)}
@@ -305,9 +346,18 @@ export function ProjectWorkspace({
               …
             </button>
             {projectMenu && (
-              <div className="absolute right-0 z-10 mt-2 w-40 rounded-lg border border-slate-200 bg-white p-1 shadow-lg">
+              <div className="absolute right-0 z-20 mt-2 w-44 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
                 <button
-                  className="w-full rounded-md px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                  onClick={() => {
+                    setProjectMenu(false);
+                    setExportOpen(true);
+                  }}
+                >
+                  导出成果
+                </button>
+                <button
+                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
                   onClick={() => {
                     setProjectMenu(false);
                     setDeletingProject(true);
@@ -319,7 +369,7 @@ export function ProjectWorkspace({
             )}
           </div>
           {reportBlockedReason && (
-            <span className="self-center text-xs text-amber-700">
+            <span className="w-full text-right text-xs text-amber-700">
               {reportBlockedReason}
             </span>
           )}
@@ -345,17 +395,59 @@ export function ProjectWorkspace({
           {notice}
         </p>
       )}
-      <div className="my-7 flex flex-wrap gap-x-8 gap-y-2 border-y border-slate-200 py-4 text-sm">
-        <span>
-          Task 总数 <b className="ml-2 text-lg">{tasks.length}</b>
-        </span>
-        <span>
-          已完成 <b className="ml-2 text-lg text-emerald-700">{completed}</b>
-        </span>
-        <span>
-          未完成 <b className="ml-2 text-lg">{tasks.length - completed}</b>
-        </span>
-      </div>
+      <section
+        aria-label="流程概览"
+        className="mt-7 rounded-xl border border-slate-200/50 bg-white/40 px-5 py-3 sm:px-6"
+      >
+        <div className="mb-2 flex items-center justify-between gap-4">
+          <h2 className="text-sm font-semibold text-slate-800">流程概览</h2>
+          <span className="text-[11px] text-slate-300">
+            从任务建立到报告交付
+          </span>
+        </div>
+        <ol className="grid grid-cols-5">
+          {workflowSteps.map((step, index) => (
+            <li key={step.label} className="relative min-w-0 pr-2 last:pr-0">
+              {index < workflowSteps.length - 1 && (
+                <span
+                  className="absolute top-2.5 left-3 h-px w-[calc(100%-0.5rem)] bg-slate-200/80"
+                  aria-hidden="true"
+                />
+              )}
+              <div className="relative flex items-start gap-2">
+                <span className="mt-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-full border border-slate-300 bg-white text-[9px] font-semibold text-blue-600">
+                  {index + 1}
+                </span>
+                <span className="min-w-0 bg-white/70 pr-2">
+                  <span className="block truncate text-xs font-semibold text-slate-700">
+                    {step.label}
+                  </span>
+                  <span className="mt-0.5 block truncate text-[11px] text-slate-400">
+                    {step.detail}
+                  </span>
+                </span>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </section>
+      <section
+        aria-label="项目概览"
+        className="mt-5 mb-2 flex flex-wrap gap-x-14 gap-y-3 border-b border-slate-200/80 pb-2"
+      >
+        {[
+          ["核查任务", tasks.length],
+          ["已完成", completed],
+          ["证据留痕", projectCounts.captures],
+        ].map(([label, value]) => (
+          <div key={label} className="min-w-24">
+            <strong className="block text-2xl font-semibold tracking-tight text-slate-950">
+              {value}
+            </strong>
+            <span className="mt-0.5 block text-xs text-slate-500">{label}</span>
+          </div>
+        ))}
+      </section>
       {error && (
         <p className="error mb-5" role="alert">
           {error}{" "}
@@ -364,11 +456,14 @@ export function ProjectWorkspace({
           </button>
         </p>
       )}
-      <section aria-label="任务筛选" className="mb-5 grid gap-3 md:grid-cols-4">
-        <label>
-          搜索
+      <section
+        aria-label="核查任务筛选"
+        className="mb-5 flex flex-wrap items-end gap-3"
+      >
+        <label className="min-w-72 flex-1">
+          <span className="sr-only">搜索核查任务</span>
           <input
-            placeholder="核查对象、事项或网站名称"
+            placeholder="搜索核查对象、事项或数据来源…"
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
@@ -376,8 +471,8 @@ export function ProjectWorkspace({
             }}
           />
         </label>
-        <label>
-          状态
+        <label className="w-36">
+          <span className="sr-only">状态</span>
           <select
             value={status}
             onChange={(e) => {
@@ -393,42 +488,48 @@ export function ProjectWorkspace({
             ))}
           </select>
         </label>
-        <label>
-          核查对象
-          <select
-            value={entity}
-            onChange={(e) => {
-              setEntity(e.target.value);
-              setPage(1);
-            }}
-          >
-            <option value="">全部对象</option>
-            {[...new Set(tasks.map((t) => t.entity_name))]
-              .sort()
-              .map((value) => (
-                <option key={value}>{value}</option>
-              ))}
-          </select>
-        </label>
-        <label>
-          核查事项
-          <select
-            value={topic}
-            onChange={(e) => {
-              setTopic(e.target.value);
-              setPage(1);
-            }}
-          >
-            <option value="">全部事项</option>
-            {[...new Set(tasks.map((t) => t.topic))].sort().map((value) => (
-              <option key={value}>{value}</option>
-            ))}
-          </select>
-        </label>
+        <details className="group relative">
+          <summary className="btn list-none select-none">更多筛选</summary>
+          <div className="absolute right-0 z-20 mt-2 grid w-72 gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-lg">
+            <label>
+              核查对象
+              <select
+                value={entity}
+                onChange={(e) => {
+                  setEntity(e.target.value);
+                  setPage(1);
+                }}
+              >
+                <option value="">全部对象</option>
+                {[...new Set(tasks.map((t) => t.entity_name))]
+                  .sort()
+                  .map((value) => (
+                    <option key={value}>{value}</option>
+                  ))}
+              </select>
+            </label>
+            <label>
+              核查事项
+              <select
+                value={topic}
+                onChange={(e) => {
+                  setTopic(e.target.value);
+                  setPage(1);
+                }}
+              >
+                <option value="">全部事项</option>
+                {[...new Set(tasks.map((t) => t.topic))].sort().map((value) => (
+                  <option key={value}>{value}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </details>
       </section>
       <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
         <span>
-          显示 {pagination.start}–{pagination.end} / {filtered.length} 项 Task
+          显示 {pagination.start}–{pagination.end} / {filtered.length}{" "}
+          项核查任务
         </span>
         {(search || status || entity || topic) && (
           <button
@@ -446,7 +547,7 @@ export function ProjectWorkspace({
       </div>
       {selectedTasks.length > 0 && (
         <div className="mb-3 flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
-          <span>已选择 {selectedTasks.length} 个任务</span>
+          <span>已选择 {selectedTasks.length} 个核查任务</span>
           <button
             className="font-medium text-red-700"
             onClick={() => setBatchDeleteOpen(true)}
@@ -456,8 +557,8 @@ export function ProjectWorkspace({
         </div>
       )}
       <div className="panel overflow-x-auto">
-        <table className="w-full min-w-[780px]">
-          <thead className="border-b border-slate-200 bg-slate-50">
+        <table className="w-full min-w-[860px]">
+          <thead className="border-b border-slate-100 bg-slate-50/80">
             <tr>
               <th className="w-14">
                 <span className="sr-only">选择</span>
@@ -479,21 +580,19 @@ export function ProjectWorkspace({
                   }
                 />
               </th>
-              <th className="w-16">序号</th>
-              <th className="w-40">状态</th>
               <th>核查对象</th>
               <th>核查事项</th>
-              <th>核查网站</th>
-              <th>Query 数量</th>
-              <th>留痕数量</th>
-              <th>操作</th>
+              <th>数据来源</th>
+              <th className="w-36">状态</th>
+              <th className="w-24">证据留痕</th>
+              <th className="w-40 text-right">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {pageTasks.map((task) => (
               <tr
                 key={task.id}
-                className="cursor-pointer hover:bg-slate-50"
+                className="cursor-pointer transition-colors hover:bg-slate-50/70"
                 onClick={() => setSelected(task.id)}
               >
                 <td onClick={(event) => event.stopPropagation()}>
@@ -513,11 +612,17 @@ export function ProjectWorkspace({
                     }
                   />
                 </td>
-                <td className="text-slate-500">
-                  {sequenceByTask.get(task.id)}
+                <td className="font-medium break-words text-slate-900">
+                  <span className="mr-2 text-xs font-normal text-slate-400">
+                    #{sequenceByTask.get(task.id)}
+                  </span>
+                  {task.entity_name}
                 </td>
+                <td>{task.topic}</td>
+                <td className="text-slate-600">{task.source_name}</td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <select
+                    className="h-8 min-h-0 w-28 rounded-full border-slate-200 bg-slate-50 px-3 py-0 text-xs font-medium"
                     aria-label={`${task.entity_name} ${task.topic} 状态`}
                     value={task.status}
                     disabled={!!pending}
@@ -532,43 +637,50 @@ export function ProjectWorkspace({
                     ))}
                   </select>
                 </td>
-                <td className="font-medium break-words">{task.entity_name}</td>
-                <td>{task.topic}</td>
-                <td>{task.source_name}</td>
-                <td>{task.queries[0]?.count ?? 0}</td>
-                <td>{task.capture_count}</td>
                 <td>
-                  <div className="flex gap-4">
+                  <span className="font-semibold text-slate-900">
+                    {task.capture_count}
+                  </span>
+                  <span className="ml-1 text-xs text-slate-400">份</span>
+                </td>
+                <td onClick={(event) => event.stopPropagation()}>
+                  <div className="flex items-center justify-end gap-2">
                     <button
-                      className="text-blue-700"
+                      className="whitespace-nowrap text-sm font-medium text-blue-700 hover:text-blue-800"
                       onClick={(e) => {
                         e.stopPropagation();
                         setSelected(task.id);
                       }}
                     >
-                      查看
+                      查看详情 →
                     </button>
-                    <button
-                      disabled={!!pending}
-                      className="text-slate-600"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelected(null);
-                        setEditor(task);
-                      }}
-                    >
-                      编辑
-                    </button>
-                    <button
-                      disabled={!!pending}
-                      className="text-red-700"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setDeletingTask(task);
-                      }}
-                    >
-                      删除
-                    </button>
+                    <details className="group relative">
+                      <summary
+                        className="icon-button size-8 list-none select-none"
+                        aria-label={`${task.entity_name} ${task.topic} 更多操作`}
+                      >
+                        ···
+                      </summary>
+                      <div className="absolute right-0 bottom-full z-20 mb-1 w-28 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+                        <button
+                          disabled={!!pending}
+                          className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50 hover:text-slate-900"
+                          onClick={() => {
+                            setSelected(null);
+                            setEditor(task);
+                          }}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          disabled={!!pending}
+                          className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
+                          onClick={() => setDeletingTask(task)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </details>
                   </div>
                 </td>
               </tr>
@@ -585,15 +697,15 @@ export function ProjectWorkspace({
                     className="btn primary"
                     href={`/projects/${projectId}/tasks/generate`}
                   >
-                    批量生成任务
+                    批量创建
                   </Link>
                   <button className="btn" onClick={() => setEditor("new")}>
-                    手动新建任务
+                    新建核查任务
                   </button>
                 </div>
               </div>
             ) : (
-              "没有匹配的 Task，请调整筛选条件。"
+              "没有匹配的核查任务，请调整筛选条件。"
             )}
           </div>
         )}
