@@ -3,6 +3,11 @@ import { createContext, useContext, useEffect, useState } from "react";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 import { getSupabase } from "@/lib/supabase";
+import {
+  registrationErrorMessage,
+  registrationValidationError,
+  type AuthMode,
+} from "@/lib/auth";
 import Link from "next/link";
 
 const AuthContext = createContext<{
@@ -20,6 +25,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [notice, setNotice] = useState("");
   useEffect(() => {
     if (!db) return;
     let active = true;
@@ -70,30 +77,78 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return (
       <main className="mx-auto mt-20 max-w-sm px-4">
         <div className="panel p-7">
-          <p className="text-xs font-semibold tracking-widest text-blue-700">
-            LEGAL WEB CHECK
-          </p>
-          <h1 className="mt-3 text-2xl font-semibold">非诉网核工作台</h1>
+          <h1 className="text-2xl font-semibold">非诉网核工作台</h1>
           <p className="mt-2 text-sm text-slate-500">
-            登录后管理项目与核查任务
+            {authMode === "login"
+              ? "登录后管理项目与核查任务"
+              : "注册账号以开始使用工作台"}
           </p>
+          <div className="mt-6 grid grid-cols-2 gap-2" aria-label="账号操作">
+            {(["login", "register"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={`btn ${authMode === mode ? "primary" : "ghost"}`}
+                aria-pressed={authMode === mode}
+                disabled={busy}
+                onClick={() => {
+                  setAuthMode(mode);
+                  setError("");
+                  setNotice("");
+                }}
+              >
+                {mode === "login" ? "登录" : "注册"}
+              </button>
+            ))}
+          </div>
           <form
-            className="mt-8 space-y-5"
+            className="mt-6 space-y-5"
             onSubmit={async (event) => {
               event.preventDefault();
               if (busy) return;
-              setBusy(true);
               setError("");
+              setNotice("");
               const values = new FormData(event.currentTarget);
+              const email = String(values.get("email")).trim();
+              const password = String(values.get("password"));
+              if (authMode === "register") {
+                const validationError = registrationValidationError(
+                  password,
+                  String(values.get("passwordConfirmation")),
+                );
+                if (validationError) {
+                  setError(validationError);
+                  return;
+                }
+              }
+              setBusy(true);
               try {
-                const { error } = await db.auth.signInWithPassword({
-                  email: String(values.get("email")).trim(),
-                  password: String(values.get("password")),
-                });
-                if (error)
-                  setError("登录失败，请检查邮箱、密码及账号是否已确认。");
+                if (authMode === "login") {
+                  const { error } = await db.auth.signInWithPassword({
+                    email,
+                    password,
+                  });
+                  if (error)
+                    setError("登录失败，请检查邮箱、密码及账号是否已确认。");
+                } else {
+                  const { data, error } = await db.auth.signUp({
+                    email,
+                    password,
+                  });
+                  if (error) {
+                    setError(registrationErrorMessage(error));
+                  } else if (data.session) {
+                    setSession(data.session);
+                  } else {
+                    setNotice("注册成功，请前往邮箱完成确认后再登录。");
+                  }
+                }
               } catch {
-                setError("登录失败，请检查网络后重试。");
+                setError(
+                  authMode === "login"
+                    ? "登录失败，请检查网络后重试。"
+                    : "注册失败，请检查网络后重试。",
+                );
               } finally {
                 setBusy(false);
               }
@@ -113,17 +168,41 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               <input
                 name="password"
                 type="password"
-                autoComplete="current-password"
+                autoComplete={
+                  authMode === "login" ? "current-password" : "new-password"
+                }
                 required
               />
             </label>
+            {authMode === "register" && (
+              <label>
+                确认密码
+                <input
+                  name="passwordConfirmation"
+                  type="password"
+                  autoComplete="new-password"
+                  required
+                />
+              </label>
+            )}
             {error && (
               <p role="alert" className="error">
                 {error}
               </p>
             )}
+            {notice && (
+              <p role="status" className="text-sm text-emerald-700">
+                {notice}
+              </p>
+            )}
             <button className="btn primary w-full" disabled={busy}>
-              {busy ? "登录中…" : "登录"}
+              {busy
+                ? authMode === "login"
+                  ? "登录中…"
+                  : "注册中…"
+                : authMode === "login"
+                  ? "登录"
+                  : "注册"}
             </button>
           </form>
         </div>
