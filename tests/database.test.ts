@@ -34,6 +34,17 @@ test("Milestone 1 migration, ownership, constraints and cascades", async (t) => 
         "utf8",
       ),
     );
+    // M5 adds analysis_draft jsonb to projects; isolation is delegated to the
+    // existing projects_owner policy (for all to authenticated, owner_id = auth.uid()).
+    await db.exec(
+      await readFile(
+        new URL(
+          "../supabase/migrations/202609140005_milestone_5.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
     async function asUser(id: string) {
       await db.exec("reset role; set role authenticated;");
       await db.query("select set_config('request.jwt.claim.sub', $1, false)", [
@@ -127,6 +138,61 @@ test("Milestone 1 migration, ownership, constraints and cascades", async (t) => 
           ),
           /row-level security/,
         );
+      },
+    );
+    await t.test(
+      "analysis_draft is owner-scoped: User B cannot read or write Project A's draft",
+      async () => {
+        await asUser(a);
+        await db.query(
+          "update projects set analysis_draft = $1::jsonb where id = $2",
+          ['{"version":1,"sections":[{"title":"结论","body":"草稿"}]}', pa],
+        );
+        await asUser(b);
+        // B cannot even see A's project row → the draft is invisible
+        assert.equal(
+          (
+            await db.query(
+              "select analysis_draft from projects where id = $1",
+              [pa],
+            )
+          ).rows.length,
+          0,
+        );
+        // B cannot overwrite A's draft (WITH CHECK on projects_owner fails)
+        assert.equal(
+          (
+            await db.query(
+              "update projects set analysis_draft = $1::jsonb where id = $2 returning id",
+              ['{"version":9,"sections":[]}', pa],
+            )
+          ).rows.length,
+          0,
+        );
+        // B can still read/confirm their own draft (RLS is per-row, not global)
+        await db.query(
+          "update projects set analysis_draft = $1::jsonb where id = $2",
+          ['{"version":1,"sections":[{"title":"B","body":"x"}]}', pb],
+        );
+        const own = (
+          await db.query<{ analysis_draft: unknown }>(
+            "select analysis_draft from projects where id = $1",
+            [pb],
+          )
+        ).rows[0];
+        assert.ok(own && own.analysis_draft);
+        await asUser(a);
+        // A's draft is untouched by B's attempts
+        const mine = (
+          await db.query<{ analysis_draft: unknown }>(
+            "select analysis_draft from projects where id = $1",
+            [pa],
+          )
+        ).rows[0];
+        assert.deepEqual(mine.analysis_draft, {
+          version: 1,
+          sections: [{ title: "结论", body: "草稿" }],
+        });
       },
     );
     await t.test(
