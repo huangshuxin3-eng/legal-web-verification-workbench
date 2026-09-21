@@ -7,3 +7,4 @@ node_modules/
 supabase/.temp/
 extension/.dist-staging/
 extension/.dist-previous/
+release/*.zip
