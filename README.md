@@ -25,6 +25,26 @@
 → DOCX / Excel 输出
 ```
 
+## 产品界面
+
+### Web 工作台
+
+项目、核查任务和核查状态集中在同一工作区。
+
+![Web 工作台](docs/images/workbench.png)
+
+### 网页核查助手
+
+在目标网站执行查询、翻页、详情访问和 PDF 留痕。
+
+![网页核查助手](docs/images/extension.png)
+
+### AI 分析与报告
+
+基于结构化核查结果生成分析草稿，并经人工确认后进入报告。
+
+![AI 分析与报告](docs/images/analysis.png)
+
 ## 核心功能
 
 - 项目与核查任务管理
