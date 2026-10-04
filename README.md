@@ -1,189 +1,147 @@
 # 非诉网核工作台
 
-依据《非诉网核工作台 PRD v1.0》实现 Project → Task → Query → Capture（用户界面称“留痕”）。Milestone 4 增加正式 Chrome Side Panel：对当前网页一键生成完整 PDF，并通过用户 JWT、现有 RLS 和 M3 协调协议归档到 Private Storage。Milestone 5 增加应用层批量任务生成器，按“核查对象 × 核查范围”预览、去重并批量创建 Task。Milestone 6 增加项目级网核成果导出，生成一份简单 Excel 清单和按主体、事项整理的 Private Capture ZIP。Milestone 8.1 增加中国执行信息公开网“执行”单 Task 半自动无结果闭环；Milestone 8.2a 把该闭环推进到第一页列表与全部详情自动留痕；Milestone 8.2b 泛化为多页全量留痕并支持中断恢复；Milestone 8.3 增加尽调报告线，把留痕解析为 Excel 执行记录核对表与 docx 尽调报告、接入项目页入口，并完成留痕加载的有界并发优化。详细说明见 [MILESTONE_4.md](MILESTONE_4.md)、[MILESTONE_5.md](MILESTONE_5.md)、[MILESTONE_6.md](MILESTONE_6.md)、[MILESTONE_8_1.md](MILESTONE_8_1.md)、[MILESTONE_8_2A.md](MILESTONE_8_2A.md)、[MILESTONE_8_2B.md](MILESTONE_8_2B.md) 和 [MILESTONE_8_3.md](MILESTONE_8_3.md)。
+非诉网核工作台是一款面向律师和法律从业者的公开信息核查工具。它通过 Web 工作台和 Chrome 网页核查助手，将网页查询、证据留存、结构化整理、AI 辅助分析和报告生成放在同一套工作流程中。
 
-已通过 M1/M2 的数据库只执行 `supabase/migrations/202609140003_milestone_3.sql`，不要重跑旧迁移。完整升级、权限、失败恢复和验收说明见 [Milestone 3 交付说明](./MILESTONE_3.md)。仅使用原有 Publishable Key 和登录用户 JWT，没有新增环境变量或 service role 依赖。
+- **产品形态：** Web 工作台 + Chrome 网页核查助手
+- **V1 数据源：** 中国执行信息公开网
+- **当前阶段：** External Beta
 
-## 1. 已完成的功能
+## 产品背景
 
-- Supabase Auth 邮箱密码登录、会话恢复与退出；未登录时只显示登录入口。
-- 项目列表：名称、编号、真实 Task 数量、北京时间创建时间、进入项目。
-- 新建项目 Modal：名称必填、编号可选；保存成功后进入工作台。
-- 工作台：项目名称、编号、Task 总数、已完成、未完成（包含无法完成）。顶部数量始终基于整个项目，不受筛选影响。
-- 新增、编辑 Task；必填校验、只含空格校验、HTTP(S) 网址校验。
-- 四种状态切换；数据库维护 completed_at，接口返回落库结果后才更新页面。
-- 对象、事项、网站名称搜索；状态、对象、事项组合筛选与清空筛选。
-- 点击 Task 行或“查看”打开右侧 Drawer，展示全部要求的详情字段及编辑入口。
-- 原生 dialog 处理模态焦点、Escape 关闭、关闭后焦点恢复；保存期间防重复提交。
-- 加载、空列表、无搜索结果、失败重试、无权访问状态。
-- Drawer 查询记录：自动编号、新增、编辑、确认删除，展示创建时间；工作台显示真实 Query 数量。
-- 每个 Task 保存已分配编号上限，删除不复用；首次 Query 创建与 not_started → in_progress 在同一事务完成。
-- Project 工作台可进入三步批量任务生成器；预设范围保存在应用配置中，URL 必须由应用明确配置或由用户本次填写后才能创建。
-- Task Drawer 支持永久删除 Task；Project 工作台的项目操作菜单支持输入完整名称后永久删除 Project。父级删除逐条复用留痕删除协调协议，先清理 Private Storage 文件再删除数据库记录。
-- Task 表按主体、M5 预设事项顺序和创建顺序规范排列，使用完整项目稳定序号及 25/50/100 分页；批量删除的勾选范围严格限制在当前页。
-- Project Workbench 支持导出网核成果 ZIP；只导出有 Capture 的 Task，内含单 Sheet Excel 清单及按主体、事项分层的全部 Private Capture 文件，并复用工作台的规范排序。
-- Chrome Side Panel 使用可搜索 Task Picker，按核查对象、事项、网站名称过滤，并用当前标签页与 Task URL 的完整 hostname 精确匹配推荐项。
-- 支持 `执行 + 中国执行信息公开网` 的确定性半自动核查：每轮固定使用 `Task.entity_name`，不读取手工选中的 Query；滑块始终人工完成，明确无结果后新建本轮 Query 和 PDF Capture，有结果则新建本轮 Query 后暂停等待人工核查，同一 Task 可重复发起并记录多次真实检索。
-- 支持上述网站的第一页全量留痕：确认有结果后复用同一检索词的 canonical Query（无则新建一次），先留痕第一页结果列表，再按网站展示顺序逐条打开详情并生成 PDF，每次返回列表后复核仍在第 1 页；全部完成后停在 `FIRST_PAGE_COMPLETE`，不触发任何分页动作。
-- 支持多页全量留痕：从第一页之后逐页推进直到最后一页，每页都先留痕列表再逐条留痕详情；页间以冻结结果集合与网站自报总页数 baseline 为判据，任一不一致即暂停（`RESUME_BOUNDARY_CHANGED` / `TOTAL_PAGES_CHANGED`），中断后可恢复且不重复留痕，最终写 `DONE`。
-- 项目页支持一次点击生成 docx 尽调报告；开发 CLI 另可把留痕解析为 Excel 执行记录核对表（主表 + 未纳入清单）。解析为确定性实现，报告只在核查完成后生成，未引入 AI 抽取。
+公开信息查询本身并不复杂，但查询以后通常还要翻页、打开详情、保存证据、整理字段、制作工作底稿并撰写报告。资料分散在网页、截图、表格和文档中时，后续复核也很难快速找到原始来源。
 
-只使用四张业务表。Web 手动留痕支持 PDF/PNG/JPG、私有预览、中文名下载、确认删除和 Query/Task 留痕计数；Extension 的手工模式仍只选择已有 Query 并归档当前网页，M8.1 仅在确认实际查询结果后创建本次 Query。
+本项目把这些操作放进一套连续的工作流程，并保留核查记录与 PDF 证据之间的对应关系，方便检查和导出成果。
 
-项目编辑仍未增加 UI；Project 和 Task 删除入口已经补齐。
-
-## 2. 数据库 Schema / Migration
-
-新数据库依次执行 M1、M2、M3、M4 四份迁移；已有 M3 数据库只执行 M4。M4 允许 Capture URL 为空、增加 PDF MIME 与 20 MiB 限制，但 Capture 仍只有原有六个字段。
-
-| 表       | 字段与约束                                                                                                                                                                                |
-| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| projects | id UUID 主键；owner_id UUID 非空，引用 auth.users；name TEXT 非空非空白；code TEXT 可空；status 默认 active，限 active/completed；created_at TIMESTAMPTZ 非空默认 now()                   |
-| tasks    | id UUID 主键；project_id UUID 非空；entity_name/topic/source_name/source_url TEXT 必填；note TEXT 可空；status 默认 not_started，限四种状态；created_at 非空默认 now()；completed_at 可空 |
-| queries  | id UUID 主键；task_id UUID 非空；query_no 正整数；query_text TEXT 非空；created_at 非空默认 now()；UNIQUE(task_id, query_no)                                                              |
-| captures | id UUID 主键；query_id UUID 非空；capture_no 正整数；storage_path TEXT 非空；source_url TEXT 可空；created_at 非空默认 now()；UNIQUE(query_id, capture_no)                                |
-
-所有 id 默认 gen_random_uuid()。Project → Task → Query → Capture 外键均为 ON DELETE CASCADE。删除 Auth 用户也会删除其项目树。projects.owner_id、tasks.project_id 有索引；两组序号唯一约束的索引同时覆盖各自父级外键查询。
-
-`set_task_completed_at` 为非 SECURITY DEFINER 触发器函数：首次进入 completed 时写数据库当前时间；completed 状态下编辑保留原时间（阻止直接篡改）；退出 completed 清空；再次完成写新的时间。CHECK 约束保证状态和完成时间一致。未绑定留痕完成条件，符合本阶段范围。
-
-## 3. RLS 策略
-
-四表均启用 RLS，每表一个 `FOR ALL TO authenticated` 策略，包含 USING 和 WITH CHECK：
-
-- projects：owner_id 必须等于 auth.uid()。
-- tasks：父 Project 必须属于当前用户。
-- queries：父 Task 必须能通过其 RLS 被当前用户读取。
-- captures：父 Query 必须能通过其 RLS 被当前用户读取。
-
-USING 限制读取、更新和删除已有行；WITH CHECK 限制插入以及更新后的归属。不能把自己的行迁移到他人的项目树。匿名角色没有四表权限，authenticated 不获得 TRUNCATE。M2 进一步收窄列级写权限：Query 只能新增 task_id/query_text、编辑 query_text；Task 计数器只能由自动编号触发器维护。该触发器使用 SECURITY DEFINER 并显式验证 auth.uid() 对应的 Project Owner，固定空 search_path，禁止客户端直接调用。
-
-浏览器只使用 publishable key（也兼容旧 anon key）和 Supabase Auth JWT，不使用 service_role。登录视图只是界面入口控制，真正的数据安全边界是数据库 RLS。Next.js 不在服务器渲染任何用户私有数据。
-
-参考：[Supabase RLS 官方文档](https://supabase.com/docs/guides/database/postgres/row-level-security)、[Next.js 安装文档](https://nextjs.org/docs/app/getting-started/installation)。
-
-## 4. 主要目录
+## 核心流程
 
 ```text
-nonlit-workbench/
-├── src/app/
-│   ├── layout.tsx                      # 全局布局与 AuthProvider
-│   ├── page.tsx                        # 项目列表
-│   ├── globals.css                     # Tailwind 与基础样式
-│   ├── projects/[projectId]/page.tsx   # 工作台路由，没有 Task 详情页
-│   ├── projects/[projectId]/tasks/generate/page.tsx   # 批量任务生成页
-│   └── api/                            # Route Handlers（用户 JWT + RLS）
-│       ├── captures/…                  # 留痕写入、修改删除、恢复
-│       ├── projects/[projectId]/export/route.ts   # 项目成果导出（ZIP + Excel）
-│       ├── projects/[projectId]/report/route.ts   # 尽调报告生成入口（返回 docx）
-│       ├── queries/[queryId]/route.ts
-│       └── tasks/…                     # 单条 / 批量 / 生成
-├── src/components/
-│   ├── auth-provider.tsx               # 登录、会话、退出
-│   ├── dialog.tsx                      # Modal/Drawer 共用模态容器
-│   ├── project-form.tsx                # 创建项目
-│   ├── project-export-dialog.tsx       # 项目成果导出
-│   ├── project-report-dialog.tsx       # 「生成尽调报告」按钮与下载
-│   ├── project-workspace.tsx           # Task 查询、筛选及写入
-│   ├── capture-section.tsx             # 留痕列表与操作
-│   ├── query-section.tsx               # Query 列表与操作
-│   ├── task-generator.tsx              # 批量任务生成
-│   ├── task-form.tsx                   # 新增/编辑 Task
-│   └── task-drawer.tsx                 # Task 详情
-├── src/lib/
-│   ├── database.types.ts               # 四层数据与 Supabase 类型
-│   ├── supabase.ts                     # 浏览器客户端单例
-│   ├── tasks.ts                        # 状态、网址与错误处理
-│   ├── report-names.ts                 # 报告命名 / 核查日 / 范围口径（服务端与 UI 共用）
-│   ├── project-export.ts               # 导出命名与打包口径
-│   └── server/
-│       └── zxgk-report.ts              # 尽调报告服务端流水线（下载 → 解析 → 渲染 docx）
-├── scripts/                            # 开发 CLI，不是产品入口
-│   ├── zxgk-execution-parse.ts         # 解析器与主表列定义（唯一事实来源）
-│   ├── zxgk-report-docx.ts             # docx 渲染器
-│   ├── build-execution-table.ts        # Excel 执行记录核对表 CLI
-│   └── build-report-docx.ts            # docx 报告 CLI
-├── extension/                          # Chrome Side Panel，独立包，dist/ 产物随仓库入库
-│   ├── src/                            # worker.mjs / sidepanel / adapters / lib
-│   └── tests/                          # 扩展侧自动化测试
-├── supabase/migrations/                # 202609140001 ~ 202609140004（四份）
-├── tests/                              # 根测试，含 zxgk-execution-parse / zxgk-report-docx / zxgk-report-flow
-├── .env.example
-├── package.json
-└── package-lock.json
+创建项目
+→ 创建核查任务
+→ 浏览器助手执行核查
+→ PDF 证据留痕
+→ 结构化整理
+→ AI 辅助分析
+→ 人工确认
+→ DOCX / Excel 输出
 ```
 
-## 5. 本地运行
+## 核心功能
 
-使用 Node.js 22.18+（推荐当前维护的 LTS）和 npm，PowerShell 中运行：
+- 项目与核查任务管理
+- 批量创建核查任务
+- Chrome 网页核查助手
+- 中国执行信息公开网自动核查
+- 查询结果分页与详情处理
+- 核查中断后继续执行，避免重复生成已完成的证据
+- PDF 私有证据留痕、预览与下载
+- 执行及失信公开信息的结构化整理
+- AI 辅助分析草稿
+- AI 内容编辑、保存与人工确认
+- AI 分析与当前核查结果的一致性校验
+- DOCX 尽调报告生成
+- Excel 核查清单及 PDF 证据 ZIP 成果包
+- 邮箱注册、登录、会话恢复与退出
+- 基于 Supabase Auth 和 RLS 的多用户数据隔离
+- Production Extension 构建与 External Beta 安装包
 
-```powershell
-cd 'C:\Users\黄舒心\Documents\产品经理计划\nonlit-workbench'
+## AI 在产品中的使用方式
+
+案号、金额、日期、数量和分类等基础事实由固定规则处理，AI 不直接负责确定这些内容。
+
+AI 基于系统已经整理好的结构化结果生成四部分分析草稿：
+
+- 核查结果概览
+- 重点关注事项
+- 重点记录
+- 建议进一步核实事项
+
+用户可以编辑和保存草稿。只有经过人工确认的 AI 内容才会进入最终报告。系统会记录 AI 分析对应的核查结果版本；底层结果变化后，旧分析需要重新生成和确认。技术实现中使用 `sourceHash` 进行版本一致性校验。
+
+## 当前状态
+
+已经完成：
+
+- V1 核心工作流
+- 公网部署
+- 邮箱注册与登录
+- 多用户数据隔离
+- 生产环境插件构建
+- External Beta 安装包
+- 公网环境完整流程验证
+
+仍待完成：
+
+- 邀请 3–5 名真实外部目标用户完成正式 Beta 验证
+- 根据真实使用记录整理问题并决定后续迭代
+
+当前版本已经具备外部测试条件，但还需要通过真实用户测试验证使用体验和实际价值。
+
+## 在线环境
+
+公网工作台：<https://legal-web-verification-workbench.vercel.app>
+
+V1 以桌面端使用为主。完整核查流程需要桌面版 Google Chrome 和配套网页核查助手，手机端无法完成依赖 Chrome Extension 的自动核查流程。
+
+## 本地运行
+
+### 运行环境
+
+- Node.js 22.18 或更高版本
+- npm
+- Supabase 项目
+- 如需使用 AI 分析，需要可用的 DeepSeek API 配置
+
+### 安装与启动
+
+```bash
 npm ci
-Copy-Item .env.example .env.local
 ```
 
-1. 准备 Supabase 测试项目，按顺序执行三份 Migration；已有 M1/M2 项目只执行 M3。
-2. 在 Supabase Authentication 中启用 Email/Password，创建并确认一个测试用户。应用本阶段只提供登录，不提供注册、找回密码页面。
-3. 在 `.env.local` 中填入该项目 URL 和 publishable key。
-4. 执行 `npm run dev`，打开 http://localhost:3000，使用该账号登录。
+复制 `.env.example` 为 `.env.local`，填写自己的环境变量。新建 Supabase 环境时，按文件名顺序执行 `supabase/migrations/` 中的迁移，并在 Supabase Authentication 中启用邮箱密码登录。
 
-```powershell
+```bash
 npm run dev
 ```
 
-验证命令：
+默认访问 <http://localhost:3000>。
 
-```powershell
+### 环境变量
+
+| 变量                                   | 用途                                                       |
+| -------------------------------------- | ---------------------------------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`             | Supabase 项目地址                                          |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | 浏览器端使用的 Supabase Publishable Key                    |
+| `AI_BASE_URL`                          | AI 服务 API 地址                                           |
+| `AI_API_KEY`                           | 服务端调用 AI 服务使用的密钥，禁止使用 `NEXT_PUBLIC_` 前缀 |
+| `AI_MODEL`                             | AI 分析使用的模型名称                                      |
+
+不要在仓库、日志或客户端代码中写入数据库密码、Supabase service role secret、AI API key、访问令牌或账号密码。未配置 `AI_API_KEY` 时，AI 分析接口会明确返回服务不可用，其他不依赖 AI 的功能仍可使用。
+
+### 主要验证命令
+
+```bash
 npm run typecheck
 npm run test:db
 npm run extension:test
 npm run format:check
 npm run build
-npm start
 ```
 
-Extension 另有 `npm run extension:build`，生成 `extension/dist`（产物随仓库入库）。
+Chrome Extension 开发构建使用 `npm run extension:build`；Production Extension 构建使用 `npm run extension:build:production`。
 
-`npm start` 启动生产构建，与 `npm run dev` 二选一。环境变量修改后重启；生产使用时需重新 build。
+## 技术栈
 
-## 6. 必要环境变量
+- Next.js / React / TypeScript
+- Supabase Auth / PostgreSQL / Storage / RLS
+- Chrome Extension Manifest V3
+- DeepSeek API
+- DOCX / Excel / ZIP generation
 
-| 变量                                 | 说明                                                   |
-| ------------------------------------ | ------------------------------------------------------ |
-| NEXT_PUBLIC_SUPABASE_URL             | Supabase 项目 URL，如 https://项目标识.supabase.co     |
-| NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY | 同一项目的 publishable key；旧 anon key 也可填写在这里 |
+## 文档导航
 
-不需要数据库密码或 service_role key。不要将 service_role/secret key 放到 NEXT_PUBLIC 变量。未配置时显示配置提示，不会填充假数据。
+- [非诉网核工作台使用手册](docs/USER_GUIDE.md)：面向 External Beta 用户的完整使用流程与常见问题
+- [External Beta 插件安装说明](docs/EXTERNAL_BETA_INSTALL.md)：Chrome 网页核查助手安装步骤
+- [Milestone 3](MILESTONE_3.md)、[Milestone 4](MILESTONE_4.md)、[Milestone 5](MILESTONE_5.md)、[Milestone 6](MILESTONE_6.md)：数据权限、留痕、批量任务与成果导出的开发记录
+- [Milestone 8.1](MILESTONE_8_1.md)、[Milestone 8.2A](MILESTONE_8_2A.md)、[Milestone 8.2B](MILESTONE_8_2B.md)、[Milestone 8.3](MILESTONE_8_3.md)：中国执行信息公开网自动核查、恢复与报告功能的开发记录
 
-## 7. 手工验收步骤
-
-1. 执行迁移，确认 public 中仅新增四张业务表，四表 RLS 均启用。
-2. 创建用户 A、B。用 A 登录；刷新仍保持登录；退出后只显示登录表单。
-3. 新建名称为空/只含空格的项目，确认不能保存；填写名称、不填编号，创建成功并自动进入工作台；返回列表确认编号显示“—”。
-4. 创建带编号项目，确认名称、编号、创建时间正确，Task 数量为 0。
-5. 新增 Task，不填必填项、只填空格或填非 HTTP(S) 网址时不能保存；正确填写后默认未开始，计数为总数 1、完成 0、未完成 1。刷新确认落库。
-6. 新增至少另外两项 Task，使用不同对象、事项和网站；分别及组合搜索/筛选，检查结果；无匹配时显示空结果；顶部计数不随筛选变化。
-7. 编辑全部字段与备注，保存后检查表格、Drawer 和刷新后的内容一致。取消编辑不写入数据库。
-8. 依次切换四种状态；在 Supabase Table Editor 检查 completed 时 completed_at 有值，其余状态为空；已完成时只改备注不改变完成时间；再次完成生成新时间。
-9. 点击整行和查看按钮均打开右侧 Drawer；网址可新窗口访问；编辑可保存；关闭/Escape 返回工作台，无独立 Task 页面。
-10. 断网后保存，确认提示失败、不伪造成功、保留表单内容；恢复网络后重试。快速双击保存不重复提交。
-11. 用 B 在独立浏览器登录：看不到 A 的项目；访问 A 项目的 UUID 路由不能读到数据。
-12. 用 B 的 authenticated JWT 调用 Supabase API：尝试查询/修改/删除 A 的四层记录以及将 B 的 Task 关联到 A 项目；确认读取为空、修改删除为 0 行或报无权访问，插入/跨属更新失败。不要用 SQL Editor 的管理员角色代替此测试，它可以绕过 RLS。
-13. Query/Capture 的约束与级联用 `npm run test:db` 验收；它会在独立内存 PostgreSQL 中建立 A/B 完整树，检查跨属写入、两组唯一约束、删除 Task/Project 后的后代数据，无需 UI 或生产样本。
-
-## 8. Milestone 1 验证记录与通用限制
-
-- 已通过 TypeScript 检查、代码格式检查与 Next.js 生产构建。生产服务首页与项目路由 HTTP 检查均返回 200，缺少环境变量时正确显示配置提示。
-- 隔离数据库测试通过 8 个子场景（Node 报告计入父测试共 9 项）。PGlite 执行实际迁移及 PostgreSQL RLS，Auth 用户表和 auth.uid() 仅在测试中模拟；这不替代云端 Auth/JWT 集成测试。
-- M1 初次交付时未执行云端验收；用户现已确认 M1/M2 通过真实验收。M3 的本地验证和待执行的真实验收见 MILESTONE_3.md。
-- 当前列表按 500 条分批取全量后客户端筛选，避免默认 1000 行返回上限截断；请保持 Supabase API Max Rows 至少 500（默认 1000）。适合本阶段基础规模，大项目的服务器分页暂未实现。
-- 没有多标签实时订阅或乐观并发锁；其他会话的修改需刷新可见，同一记录并发编辑采用最后成功写入覆盖。
-- 超时发生在服务端提交后但响应未返回时，用户重试新增仍可能重复；没有引入幂等业务表。先刷新确认是否已经创建，再重试。
-- 已安装依赖随 package-lock.json 锁定；应用使用 Next.js 16、React 19、Tailwind 4 和 Supabase JS 2。
-
-## 9. 当前阶段边界
-
-Milestone 8.3 代码已实现并接入产品入口。M8.1 / M8.2a / M8.2b / M8.3 的自动化测试与门禁（`typecheck`、`test:db`、`extension:test`、`format:check`、`build`）在 commit `116e93d` 上全部通过；真人 Chrome + Supabase 验收按各阶段交付说明执行。
-
-本阶段未实现：AI 抽取与 AI 页面判断、OCR、异步 report job 与报告产物持久化、第二网站 adapter、报告线 Step 2 / Step 3（核查说明与律师提示模板）、Run 数据表与 Capture 新字段、自动绕过滑块。
+Milestone 文档保留了实现过程、测试口径和阶段边界，供需要深入了解开发历史的读者查阅。
