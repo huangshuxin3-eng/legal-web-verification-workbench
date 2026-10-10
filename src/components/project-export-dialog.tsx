@@ -71,28 +71,45 @@ export function ProjectExportDialog({
   }
 
   return (
-    <Dialog title="导出成果" onClose={onClose} busy={busy}>
-      <p className="text-xs font-medium text-slate-400">{projectName}</p>
-      <p className="mt-2 text-sm text-slate-600">
+    <Dialog
+      title="导出成果"
+      onClose={onClose}
+      busy={busy}
+      small
+      footer={
+        <div className="lt-footer-actions">
+          <button className="btn" disabled={busy} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="btn primary"
+            disabled={busy || !captureCount}
+            onClick={() => void generate()}
+          >
+            {busy ? "正在生成…" : "下载成果包"}
+          </button>
+        </div>
+      }
+    >
+      <p className="lt-export-project">{projectName}</p>
+      <p className="lt-export-description">
         成果包包含结构化核查结果及对应证据留痕。
       </p>
-      <div className="mt-6">
-        <p className="text-sm font-semibold text-slate-800">本次导出</p>
-      </div>
-      <dl className="my-4 divide-y divide-slate-100 rounded-xl bg-slate-50/80 px-4 text-sm">
+      <dl className="lt-export-summary">
         {[
           ["核查对象", entityCount],
           ["核查任务", taskCount],
           ["证据留痕", captureCount],
         ].map(([label, value]) => (
-          <div key={label} className="flex items-center gap-6 py-3">
-            <dt className="shrink-0 text-slate-500">{label}</dt>
-            <dd className="ml-auto break-words text-right text-base font-semibold text-slate-900">
-              {value}
-            </dd>
+          <div key={label}>
+            <dt>{label}</dt>
+            <dd>{value}</dd>
           </div>
         ))}
       </dl>
+      <p className="lt-export-note">
+        成果包将下载为 ZIP，包含本项目核查结果及对应证据文件。
+      </p>
       {!captureCount && (
         <p className="error mb-4" role="alert">
           当前项目暂无可导出的证据留痕。
@@ -103,18 +120,6 @@ export function ProjectExportDialog({
           {error}
         </p>
       )}
-      <div className="flex justify-end gap-3">
-        <button className="btn" disabled={busy} onClick={onClose}>
-          取消
-        </button>
-        <button
-          className="btn primary"
-          disabled={busy || !captureCount}
-          onClick={() => void generate()}
-        >
-          {busy ? "正在生成…" : "下载成果包"}
-        </button>
-      </div>
     </Dialog>
   );
 }

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "./auth-provider";
 import { TaskForm } from "./task-form";
+import { LegalTraceIcon } from "./legaltrace-icon";
 import { TaskDrawer } from "./task-drawer";
 import type { Project, Task, TaskStatus } from "@/lib/database.types";
 import { errorMessage, statusLabels, type TaskInput } from "@/lib/tasks";
@@ -281,14 +282,8 @@ export function ProjectWorkspace({
       </main>
     );
   return (
-    <main className="mx-auto max-w-7xl px-6 py-8 lg:py-10">
-      <Link
-        className="inline-flex items-center gap-1 text-sm text-slate-500 transition-colors hover:text-blue-700"
-        href="/"
-      >
-        ← 我的项目
-      </Link>
-      <div className="workspace-hero mt-7 flex flex-wrap items-start justify-between gap-6 px-5 py-5 sm:px-6">
+    <main className="lt-project-main">
+      <header className="lt-project-heading">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="break-words text-3xl font-semibold tracking-tight text-slate-950">
@@ -307,7 +302,7 @@ export function ProjectWorkspace({
               {projectStatus}
             </span>
           </div>
-          <p className="mt-3 text-sm text-slate-500">
+          <p className="lt-project-meta">
             法律网核与尽调 · {tasks.length} 个核查任务 ·{" "}
             {projectCounts.captures} 份证据留痕
           </p>
@@ -317,63 +312,109 @@ export function ProjectWorkspace({
             </p>
           )}
         </div>
-        <div className="flex max-w-xl flex-wrap justify-end gap-2">
-          <button
-            className="btn primary"
-            onClick={() => setEditor("new")}
-            disabled={!!pending}
-          >
-            <span aria-hidden="true">＋</span> 新建核查任务
-          </button>
-          <Link className="btn" href={`/projects/${projectId}/tasks/generate`}>
-            批量创建
-          </Link>
+        <div className="lt-project-settings relative">
           <button
             className="btn"
-            disabled={!!reportBlockedReason}
-            title={reportBlockedReason || undefined}
-            onClick={() => setReportOpen(true)}
+            aria-label="项目操作"
+            aria-expanded={projectMenu}
+            onClick={() => setProjectMenu((open) => !open)}
           >
-            生成报告
+            项目设置
           </button>
-          <div className="relative">
-            <button
-              className="btn w-10 px-0 text-lg"
-              aria-label="项目操作"
-              aria-expanded={projectMenu}
-              onClick={() => setProjectMenu((open) => !open)}
-            >
-              …
-            </button>
-            {projectMenu && (
-              <div className="absolute right-0 z-20 mt-2 w-44 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
-                <button
-                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
-                  onClick={() => {
-                    setProjectMenu(false);
-                    setExportOpen(true);
-                  }}
-                >
-                  导出成果
-                </button>
-                <button
-                  className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
-                  onClick={() => {
-                    setProjectMenu(false);
-                    setDeletingProject(true);
-                  }}
-                >
-                  删除项目
-                </button>
-              </div>
-            )}
-          </div>
-          {reportBlockedReason && (
-            <span className="w-full text-right text-xs text-amber-700">
-              {reportBlockedReason}
-            </span>
+          {projectMenu && (
+            <div className="absolute right-0 z-20 mt-2 w-44 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
+              <button
+                className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                onClick={() => {
+                  setProjectMenu(false);
+                  setExportOpen(true);
+                }}
+              >
+                导出成果
+              </button>
+              <button
+                className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
+                onClick={() => {
+                  setProjectMenu(false);
+                  setDeletingProject(true);
+                }}
+              >
+                删除项目
+              </button>
+              <details aria-label="流程概览" className="lt-workflow">
+                <summary>流程概览</summary>
+                <ol className="grid grid-cols-5">
+                  {workflowSteps.map((step, index) => (
+                    <li
+                      key={step.label}
+                      className="relative min-w-0 pr-2 last:pr-0"
+                    >
+                      {index < workflowSteps.length - 1 && (
+                        <span
+                          className="absolute top-2.5 left-3 h-px w-[calc(100%-0.5rem)] bg-slate-200/80"
+                          aria-hidden="true"
+                        />
+                      )}
+                      <div className="relative flex items-start gap-2">
+                        <span className="mt-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-full border border-slate-300 bg-white text-[9px] font-semibold text-blue-600">
+                          {index + 1}
+                        </span>
+                        <span className="min-w-0 bg-white/70 pr-2">
+                          <span className="block truncate text-xs font-semibold text-slate-700">
+                            {step.label}
+                          </span>
+                          <span className="mt-0.5 block truncate text-[11px] text-slate-400">
+                            {step.detail}
+                          </span>
+                        </span>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            </div>
           )}
         </div>
+      </header>
+      <section aria-label="项目概览" className="lt-overview-stats">
+        {[
+          ["核查任务", tasks.length],
+          ["已完成", completed],
+          ["证据留痕", projectCounts.captures],
+        ].map(([label, value]) => (
+          <div key={label}>
+            <strong>{value}</strong>
+            <span>{label}</span>
+          </div>
+        ))}
+      </section>
+      <div className="lt-work-actions">
+        <button
+          className="btn primary"
+          onClick={() => setEditor("new")}
+          disabled={!!pending}
+        >
+          新建核查任务
+        </button>
+        <Link className="btn" href={`/projects/${projectId}/tasks/generate`}>
+          批量创建
+        </Link>
+        <button
+          className="btn"
+          disabled={!!reportBlockedReason}
+          title={reportBlockedReason || undefined}
+          onClick={() => setReportOpen(true)}
+        >
+          生成报告
+        </button>
+        <button className="btn" onClick={() => setExportOpen(true)}>
+          导出项目
+        </button>
+        {reportBlockedReason && (
+          <span className="w-full text-right text-xs text-amber-700">
+            {reportBlockedReason}
+          </span>
+        )}
       </div>
       {(createdNotice > 0 || skippedNotice > 0) && (
         <p
@@ -395,59 +436,6 @@ export function ProjectWorkspace({
           {notice}
         </p>
       )}
-      <section
-        aria-label="流程概览"
-        className="tech-glass-panel mt-5 px-5 py-3 sm:px-6"
-      >
-        <div className="mb-2 flex items-center justify-between gap-4">
-          <h2 className="text-sm font-semibold text-slate-800">流程概览</h2>
-          <span className="text-[11px] text-slate-300">
-            从任务建立到报告交付
-          </span>
-        </div>
-        <ol className="grid grid-cols-5">
-          {workflowSteps.map((step, index) => (
-            <li key={step.label} className="relative min-w-0 pr-2 last:pr-0">
-              {index < workflowSteps.length - 1 && (
-                <span
-                  className="absolute top-2.5 left-3 h-px w-[calc(100%-0.5rem)] bg-slate-200/80"
-                  aria-hidden="true"
-                />
-              )}
-              <div className="relative flex items-start gap-2">
-                <span className="mt-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-full border border-slate-300 bg-white text-[9px] font-semibold text-blue-600">
-                  {index + 1}
-                </span>
-                <span className="min-w-0 bg-white/70 pr-2">
-                  <span className="block truncate text-xs font-semibold text-slate-700">
-                    {step.label}
-                  </span>
-                  <span className="mt-0.5 block truncate text-[11px] text-slate-400">
-                    {step.detail}
-                  </span>
-                </span>
-              </div>
-            </li>
-          ))}
-        </ol>
-      </section>
-      <section
-        aria-label="项目概览"
-        className="mt-5 mb-2 flex flex-wrap gap-x-14 gap-y-3 border-b border-slate-200/80 pb-2"
-      >
-        {[
-          ["核查任务", tasks.length],
-          ["已完成", completed],
-          ["证据留痕", projectCounts.captures],
-        ].map(([label, value]) => (
-          <div key={label} className="min-w-24">
-            <strong className="block text-2xl font-semibold tracking-tight text-slate-950">
-              {value}
-            </strong>
-            <span className="mt-0.5 block text-xs text-slate-500">{label}</span>
-          </div>
-        ))}
-      </section>
       {error && (
         <p className="error mb-5" role="alert">
           {error}{" "}
@@ -456,14 +444,12 @@ export function ProjectWorkspace({
           </button>
         </p>
       )}
-      <section
-        aria-label="核查任务筛选"
-        className="mb-5 flex flex-wrap items-end gap-3"
-      >
-        <label className="min-w-72 flex-1">
+      <section aria-label="核查任务筛选" className="lt-task-filters">
+        <label className="lt-search-box min-w-72 flex-1">
           <span className="sr-only">搜索核查任务</span>
+          <LegalTraceIcon name="search" />
           <input
-            placeholder="搜索核查对象、事项或数据来源…"
+            placeholder="搜索核查对象、事项或数据来源"
             value={search}
             onChange={(e) => {
               setSearch(e.target.value);
@@ -526,11 +512,14 @@ export function ProjectWorkspace({
           </div>
         </details>
       </section>
-      <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
+      <div className="lt-table-context">
         <span>
           显示 {pagination.start}–{pagination.end} / {filtered.length}{" "}
-          项核查任务
+          项核查任务 ／ {projectCounts.captures} 份证据留痕
         </span>
+        {!(search || status || entity || topic) && (
+          <span>点击核查对象查看详情</span>
+        )}
         {(search || status || entity || topic) && (
           <button
             onClick={() => {
@@ -556,8 +545,8 @@ export function ProjectWorkspace({
           </button>
         </div>
       )}
-      <div className="panel overflow-x-auto">
-        <table className="w-full min-w-[860px]">
+      <div className="lt-task-table-scroll">
+        <table className="lt-task-table">
           <thead className="border-b border-slate-100 bg-slate-50/80">
             <tr>
               <th className="w-14">
@@ -583,16 +572,16 @@ export function ProjectWorkspace({
               <th>核查对象</th>
               <th>核查事项</th>
               <th>数据来源</th>
-              <th className="w-36">状态</th>
               <th className="w-24">证据留痕</th>
-              <th className="w-40 text-right">操作</th>
+              <th className="w-36">状态</th>
+              <th className="w-40">操作</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
             {pageTasks.map((task) => (
               <tr
                 key={task.id}
-                className="cursor-pointer transition-colors hover:bg-slate-50/70"
+                className={`cursor-pointer transition-colors ${selectedTaskIds.has(task.id) ? "lt-row-selected" : ""}`}
                 onClick={() => setSelected(task.id)}
               >
                 <td onClick={(event) => event.stopPropagation()}>
@@ -612,17 +601,27 @@ export function ProjectWorkspace({
                     }
                   />
                 </td>
-                <td className="font-medium break-words text-slate-900">
-                  <span className="mr-2 text-xs font-normal text-slate-400">
+                <td>
+                  <span className="lt-row-index">
                     #{sequenceByTask.get(task.id)}
                   </span>
-                  {task.entity_name}
+                  <button
+                    className="lt-link-btn lt-entity"
+                    aria-label={`查看详情 ${task.entity_name} ${task.topic}`}
+                    onClick={() => setSelected(task.id)}
+                  >
+                    {task.entity_name}
+                  </button>
                 </td>
                 <td>{task.topic}</td>
                 <td className="text-slate-600">{task.source_name}</td>
+                <td>
+                  <span>{task.capture_count}</span>
+                  <span className="ml-1 text-xs text-slate-400">份</span>
+                </td>
                 <td onClick={(e) => e.stopPropagation()}>
                   <select
-                    className="h-8 min-h-0 w-28 rounded-full border-slate-200 bg-slate-50 px-3 py-0 text-xs font-medium"
+                    className="lt-row-status"
                     aria-label={`${task.entity_name} ${task.topic} 状态`}
                     value={task.status}
                     disabled={!!pending}
@@ -637,50 +636,25 @@ export function ProjectWorkspace({
                     ))}
                   </select>
                 </td>
-                <td>
-                  <span className="font-semibold text-slate-900">
-                    {task.capture_count}
-                  </span>
-                  <span className="ml-1 text-xs text-slate-400">份</span>
-                </td>
                 <td onClick={(event) => event.stopPropagation()}>
-                  <div className="flex items-center justify-end gap-2">
+                  <div className="lt-row-actions">
                     <button
-                      className="whitespace-nowrap text-sm font-medium text-blue-700 hover:text-blue-800"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelected(task.id);
+                      disabled={!!pending}
+                      className="lt-link-btn"
+                      onClick={() => {
+                        setSelected(null);
+                        setEditor(task);
                       }}
                     >
-                      查看详情 →
+                      编辑
                     </button>
-                    <details className="group relative">
-                      <summary
-                        className="icon-button size-8 list-none select-none"
-                        aria-label={`${task.entity_name} ${task.topic} 更多操作`}
-                      >
-                        ···
-                      </summary>
-                      <div className="absolute right-0 bottom-full z-20 mb-1 w-28 rounded-xl border border-slate-200 bg-white p-1.5 shadow-lg">
-                        <button
-                          disabled={!!pending}
-                          className="w-full rounded-lg px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50 hover:text-slate-900"
-                          onClick={() => {
-                            setSelected(null);
-                            setEditor(task);
-                          }}
-                        >
-                          编辑
-                        </button>
-                        <button
-                          disabled={!!pending}
-                          className="w-full rounded-lg px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
-                          onClick={() => setDeletingTask(task)}
-                        >
-                          删除
-                        </button>
-                      </div>
-                    </details>
+                    <button
+                      disabled={!!pending}
+                      className="lt-link-btn danger"
+                      onClick={() => setDeletingTask(task)}
+                    >
+                      删除
+                    </button>
                   </div>
                 </td>
               </tr>

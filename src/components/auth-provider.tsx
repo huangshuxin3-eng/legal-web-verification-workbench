@@ -8,7 +8,9 @@ import {
   registrationValidationError,
   type AuthMode,
 } from "@/lib/auth";
-import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { LegalTraceLanding } from "./legaltrace-landing";
+import { WorkspaceShell } from "./workspace-shell";
 
 const AuthContext = createContext<{
   db: SupabaseClient<Database>;
@@ -20,6 +22,8 @@ export function useAuth() {
   return value;
 }
 export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
+  const [showLanding, setShowLanding] = useState(true);
   const [db] = useState(getSupabase);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
@@ -73,36 +77,35 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         正在读取登录状态…
       </main>
     );
+  if (!session && showLanding && pathname === "/")
+    return <LegalTraceLanding onLogin={() => setShowLanding(false)} />;
   if (!session)
     return (
-      <main className="mx-auto mt-20 max-w-sm px-4">
-        <div className="panel p-7">
-          <h1 className="text-2xl font-semibold">非诉网核工作台</h1>
-          <p className="mt-2 text-sm text-slate-500">
-            {authMode === "login"
-              ? "登录后管理项目与核查任务"
-              : "注册账号以开始使用工作台"}
+      <main className="lt-auth">
+        <header className="lt-auth-header">
+          <button
+            onClick={() => setShowLanding(true)}
+            hidden={pathname !== "/"}
+          >
+            返回首页
+          </button>
+        </header>
+        <div className="lt-auth-content">
+          <div className="lt-auth-monogram">LT</div>
+          <h1>欢迎</h1>
+          <p className="lt-auth-subtitle">
+            {authMode === "login" ? (
+              <>
+                登录到 LegalTrace
+                <br />
+                以继续核查。
+              </>
+            ) : (
+              "注册账号以开始使用 LegalTrace"
+            )}
           </p>
-          <div className="mt-6 grid grid-cols-2 gap-2" aria-label="账号操作">
-            {(["login", "register"] as const).map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                className={`btn ${authMode === mode ? "primary" : "ghost"}`}
-                aria-pressed={authMode === mode}
-                disabled={busy}
-                onClick={() => {
-                  setAuthMode(mode);
-                  setError("");
-                  setNotice("");
-                }}
-              >
-                {mode === "login" ? "登录" : "注册"}
-              </button>
-            ))}
-          </div>
           <form
-            className="mt-6 space-y-5"
+            className="lt-auth-form"
             onSubmit={async (event) => {
               event.preventDefault();
               if (busy) return;
@@ -154,8 +157,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               }
             }}
           >
-            <label>
-              邮箱
+            <label className="lt-floating-label">
+              <span>邮箱</span>
               <input
                 name="email"
                 type="email"
@@ -163,8 +166,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 required
               />
             </label>
-            <label>
-              密码
+            <label className="lt-floating-label">
+              <span>密码</span>
               <input
                 name="password"
                 type="password"
@@ -175,8 +178,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               />
             </label>
             {authMode === "register" && (
-              <label>
-                确认密码
+              <label className="lt-floating-label">
+                <span>确认密码</span>
                 <input
                   name="passwordConfirmation"
                   type="password"
@@ -205,6 +208,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                   : "注册"}
             </button>
           </form>
+          <div className="lt-auth-modes" aria-label="账号操作">
+            {(["login", "register"] as const)
+              .filter((mode) => mode !== authMode)
+              .map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={`btn ${authMode === mode ? "primary" : "ghost"}`}
+                  aria-pressed={authMode === mode}
+                  disabled={busy}
+                  onClick={() => {
+                    setAuthMode(mode);
+                    setError("");
+                    setNotice("");
+                  }}
+                >
+                  {mode === "login" ? "登录" : "注册"}
+                </button>
+              ))}
+          </div>
         </div>
       </main>
     );
@@ -213,45 +236,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       key={session.user.id}
       value={{ db, userId: session.user.id }}
     >
-      <header className="border-b border-slate-200/80 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-6 py-3.5">
-          <Link
-            href="/"
-            className="text-sm font-semibold tracking-tight text-slate-900"
+      <WorkspaceShell
+        db={db}
+        email={session.user.email}
+        logout={
+          <button
+            className="btn ghost h-8 px-3 text-xs text-slate-500"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              try {
+                const { error } = await db.auth.signOut({ scope: "local" });
+                if (error) setError("退出失败，请重试。");
+              } catch {
+                setError("退出失败，请重试。");
+              } finally {
+                setBusy(false);
+              }
+            }}
           >
-            非诉网核工作台
-          </Link>
-          <div className="flex items-center gap-2">
-            <span className="hidden max-w-64 truncate text-xs text-slate-400 sm:inline">
-              {session.user.email}
-            </span>
-            <button
-              className="btn ghost h-8 px-3 text-xs text-slate-500"
-              disabled={busy}
-              onClick={async () => {
-                setBusy(true);
-                setError("");
-                try {
-                  const { error } = await db.auth.signOut({ scope: "local" });
-                  if (error) setError("退出失败，请重试。");
-                } catch {
-                  setError("退出失败，请重试。");
-                } finally {
-                  setBusy(false);
-                }
-              }}
-            >
-              退出登录
-            </button>
-          </div>
-        </div>
-      </header>
-      {error && (
-        <p role="alert" className="error mx-auto max-w-7xl">
-          {error}
-        </p>
-      )}
-      {children}
+            退出登录
+          </button>
+        }
+      >
+        {error && (
+          <p role="alert" className="error mx-auto max-w-7xl">
+            {error}
+          </p>
+        )}
+        {children}
+      </WorkspaceShell>
     </AuthContext.Provider>
   );
 }

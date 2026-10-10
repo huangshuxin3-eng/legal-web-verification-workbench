@@ -112,15 +112,20 @@ export function QuerySection({
   }
 
   return (
-    <section
-      className="mt-8 border-t border-slate-200 pt-6"
-      aria-label="检索批次"
-    >
-      <div className="flex items-center justify-between gap-2">
+    <section className="lt-query-section" aria-label="检索批次">
+      <div className="lt-section-heading">
         <h2 className="font-semibold">检索批次</h2>
+        <small>
+          {queries.length} 个批次 ·{" "}
+          {queries.reduce(
+            (sum, query) => sum + (query.captures?.[0]?.count ?? 0),
+            0,
+          )}{" "}
+          份留痕
+        </small>
         <button
           type="button"
-          className="btn"
+          className="lt-link-btn lt-query-add"
           disabled={busy || loading || !!editor || !!deleting}
           onClick={() => {
             setEditor("new");
@@ -225,15 +230,15 @@ export function QuerySection({
           正在加载检索批次…
         </p>
       ) : (
-        <div className="mt-4 space-y-3">
+        <div className="lt-query-list">
           {queries.map((query) => (
-            <article
-              key={query.id}
-              className="rounded-lg border border-slate-200 p-4"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <h3 className="text-sm font-semibold text-blue-700">
-                  {queryLabel(query.query_no)}
+            <article key={query.id} className="lt-query">
+              <div className="lt-query-heading">
+                <h3>
+                  {queryLabel(query.query_no)}　
+                  <span className="whitespace-pre-wrap break-words">
+                    {query.query_text}
+                  </span>
                 </h3>
                 <time
                   dateTime={query.created_at}
@@ -242,10 +247,7 @@ export function QuerySection({
                   {dateLabel(query.created_at)}
                 </time>
               </div>
-              <p className="my-3 whitespace-pre-wrap break-words text-sm">
-                {query.query_text}
-              </p>
-              <div className="flex gap-4 text-sm">
+              <div className="lt-query-actions">
                 <button
                   disabled={busy || !!editor || !!deleting}
                   onClick={() => {

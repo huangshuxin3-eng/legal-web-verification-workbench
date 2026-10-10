@@ -9,7 +9,9 @@ test("核查任务列表保留稳定序号和查看、编辑、删除操作", as
   );
   assert.match(source, /pageTasks\.map\(\(task\)/);
   assert.match(source, /sequenceByTask\.get\(task\.id\)/);
-  for (const action of ["查看详情 →", "编辑", "删除"])
+  assert.match(source, /aria-label=\{`查看详情/);
+  assert.match(source, /onClick=\{\(\) => setSelected\(task.id\)\}/);
+  for (const action of ["编辑", "删除"])
     assert.match(source, new RegExp(`>\\s*${action}\\s*<\\/button>`));
 });
 

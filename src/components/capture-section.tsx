@@ -118,10 +118,7 @@ export function CaptureSection({
     }
   }
   return (
-    <section
-      className="mt-4 border-t border-slate-100 pt-4"
-      aria-label="证据留痕管理"
-    >
+    <section className="lt-capture-section" aria-label="证据留痕管理">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-xs text-slate-600">
           证据留痕 {query.captures[0]?.count ?? 0} 份
@@ -317,25 +314,23 @@ export function CaptureSection({
           正在加载证据留痕…
         </p>
       ) : (
-        <ul className="mt-3 divide-y divide-slate-100 overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <ul className="lt-evidence-list">
           {captures.map((capture) => (
-            <li key={capture.id} className="px-3 py-2.5">
-              <div className="flex items-start gap-3">
-                <span className="mt-0.5 shrink-0 rounded-md bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-600">
+            <li key={capture.id} className="lt-evidence-item">
+              <div className="lt-evidence-row">
+                <span className="lt-capture-number">
                   {captureLabel(capture.capture_no)}
                 </span>
-                <div className="min-w-0 flex-1">
-                  <p className="break-all text-xs leading-5 text-slate-700">
-                    {filename(capture)}
-                  </p>
+                <div className="lt-evidence-name">
+                  <p>{filename(capture)}</p>
                   <time
                     dateTime={capture.created_at}
-                    className="mt-0.5 block text-[11px] text-slate-400"
+                    className="lt-evidence-time"
                   >
                     {dateLabel(capture.created_at)}
                   </time>
                 </div>
-                <div className="flex shrink-0 gap-3 pt-1 text-xs">
+                <div className="lt-row-actions">
                   <button
                     className="text-blue-700"
                     disabled={disabled}

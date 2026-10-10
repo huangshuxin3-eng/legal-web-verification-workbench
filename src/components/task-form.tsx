@@ -26,7 +26,7 @@ export function TaskForm({
       busy={busy}
       formLayout
       footer={
-        <div className="flex justify-end gap-3">
+        <div className="lt-footer-actions">
           <button
             type="button"
             className="btn"
@@ -54,7 +54,7 @@ export function TaskForm({
     >
       <form
         id="task-form"
-        className="space-y-6"
+        className="lt-task-form"
         onSubmit={async (e) => {
           e.preventDefault();
           if (busy) return;
@@ -88,9 +88,9 @@ export function TaskForm({
         <label>
           核查对象 *
           <input
-            className="h-12"
             name="entity_name"
             defaultValue={task?.entity_name}
+            placeholder="例如：远川科技有限公司"
             required
             autoFocus
           />
@@ -98,25 +98,24 @@ export function TaskForm({
         <label>
           核查事项 *
           <input
-            className="h-12"
             name="topic"
             defaultValue={task?.topic}
+            placeholder="例如：执行"
             required
           />
         </label>
         <label>
           数据来源 *
           <input
-            className="h-12"
             name="source_name"
             defaultValue={task?.source_name}
+            placeholder="请输入数据来源名称"
             required
           />
         </label>
         <label>
-          网站地址
+          网站地址 *
           <input
-            className="h-12"
             name="source_url"
             type="url"
             placeholder="https://"
@@ -127,16 +126,16 @@ export function TaskForm({
         <label>
           备注（可选）
           <textarea
-            className="min-h-[120px]"
             name="note"
-            rows={4}
+            rows={3}
+            placeholder="补充核查说明…"
             defaultValue={task?.note ?? ""}
           />
         </label>
         {task && (
           <label>
             状态
-            <select className="h-12" name="status" defaultValue={task.status}>
+            <select name="status" defaultValue={task.status}>
               {Object.entries(statusLabels).map(([value, label]) => (
                 <option value={value} key={value}>
                   {label}

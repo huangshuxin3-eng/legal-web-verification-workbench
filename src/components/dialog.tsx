@@ -8,6 +8,7 @@ export function Dialog({
   busy = false,
   wide = false,
   formLayout = false,
+  small = false,
   footer,
 }: {
   title: string;
@@ -17,6 +18,7 @@ export function Dialog({
   busy?: boolean;
   wide?: boolean;
   formLayout?: boolean;
+  small?: boolean;
   footer?: React.ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -43,20 +45,12 @@ export function Dialog({
       }}
       className={
         drawer
-          ? "fixed inset-y-0 right-0 left-auto m-0 h-dvh max-h-dvh w-full max-w-lg overflow-hidden border-l border-slate-200 bg-white p-0 shadow-xl"
-          : `fixed inset-0 m-auto max-h-[88dvh] w-[calc(100%-2rem)] overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-0 shadow-xl ${wide ? "max-w-[940px]" : formLayout ? "max-w-[800px]" : "max-w-xl"}`
+          ? "lt-dialog lt-drawer"
+          : `lt-dialog ${wide ? "lt-dialog-wide" : small ? "lt-dialog-small" : formLayout ? "lt-dialog-form" : ""}`
       }
     >
-      <div
-        className={
-          drawer
-            ? "flex h-dvh min-h-0 flex-col"
-            : "flex max-h-[88dvh] min-h-0 flex-col"
-        }
-      >
-        <div
-          className={`flex shrink-0 items-center justify-between border-b border-slate-100 px-6 ${formLayout ? "py-4" : "py-5"}`}
-        >
+      <div className="lt-modal-layout">
+        <div className="lt-modal-header">
           <h2 id={titleId} className="text-xl font-semibold tracking-tight">
             {title}
           </h2>
@@ -70,18 +64,8 @@ export function Dialog({
             <span aria-hidden="true">×</span>
           </button>
         </div>
-        <div
-          className={`min-h-0 flex-1 overflow-y-auto px-6 ${formLayout ? "py-5 sm:px-7" : "py-5"}`}
-        >
-          {children}
-        </div>
-        {footer && (
-          <div
-            className={`shrink-0 border-t border-slate-100 bg-white/95 px-6 py-4 backdrop-blur ${formLayout ? "sm:px-7" : ""}`}
-          >
-            {footer}
-          </div>
-        )}
+        <div className="lt-modal-body">{children}</div>
+        {footer && <div className="lt-modal-footer">{footer}</div>}
       </div>
     </dialog>
   );

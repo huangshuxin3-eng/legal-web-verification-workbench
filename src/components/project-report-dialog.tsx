@@ -222,25 +222,17 @@ export function ProjectReportDialog({
       busy={busy || working}
       wide
       footer={
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div className="min-w-0 text-xs leading-5">
-            <p
-              className={
-                status === "confirmed" ? "text-emerald-700" : "text-slate-500"
-              }
-            >
+        <div className="lt-report-footer">
+          <div className="lt-footer-note">
+            <p>
               {status === "confirmed"
-                ? "✓ 已确认的 AI 分析将写入本次报告。"
+                ? "已确认的 AI 分析将写入本次报告。"
                 : "当前报告不会包含 AI 分析。"}
             </p>
-            {dirty && (
-              <p className="text-amber-700">
-                请先保存修改；未保存的文本不会进入报告。
-              </p>
-            )}
+            {dirty && <p>请先保存修改；未保存的文本不会进入报告。</p>}
           </div>
-          <div className="flex items-center gap-3">
-            <button className="btn ghost" disabled={busy} onClick={onClose}>
+          <div className="lt-footer-actions">
+            <button className="btn" disabled={busy} onClick={onClose}>
               取消
             </button>
             <button
@@ -254,105 +246,83 @@ export function ProjectReportDialog({
         </div>
       }
     >
-      <div className="border-b border-slate-100 pb-5">
-        <p className="text-sm font-medium text-slate-800">{projectName}</p>
-        <p className="mt-1.5 text-sm text-slate-500">
-          {taskCount} 个核查任务 · {captureCount} 份证据留痕
-          {record ? ` · 核查日 ${record.checkDate}` : " · 核查日由证据留痕确定"}
+      <div className="lt-report-content">
+        <p
+          className="lt-report-intro"
+          title={`${projectName} · ${taskCount} 个核查任务 · ${captureCount} 份证据留痕；${record ? `核查日 ${record.checkDate}` : "核查日由证据留痕确定"}。报告范围为「${REPORT_SOURCE_NAME}」的${REPORT_TOPIC}核查任务；仅纳入当前检索词对应的详情留痕。`}
+        >
+          报告仍使用现有执行详情范围。AI 辅助整理分析，最终内容需人工确认。
         </p>
-        <p className="mt-3 text-xs leading-5 text-slate-400">
-          报告范围为「{REPORT_SOURCE_NAME}」的{REPORT_TOPIC}
-          核查任务；仅纳入当前检索词对应的详情留痕。
-        </p>
-      </div>
-      {!captureCount && (
-        <p className="error mt-4" role="alert">
-          当前项目暂无可用于生成报告的执行详情留痕。
-        </p>
-      )}
-      {error && (
-        <p className="error mt-4" role="alert">
-          {error}
-        </p>
-      )}
-      {draftError && (
-        <p className="error mt-4" role="alert">
-          {draftError}
-        </p>
-      )}
-      <section className="tech-glass-panel mt-6 p-5 sm:p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+        {!captureCount && (
+          <p className="error" role="alert">
+            当前项目暂无可用于生成报告的执行详情留痕。
+          </p>
+        )}
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {draftError && (
+          <p className="error" role="alert">
+            {draftError}
+          </p>
+        )}
+        <div className="lt-report-tools">
+          <h3>AI 辅助分析</h3>
           <div>
-            <div className="flex flex-wrap items-center gap-3">
-              <h3 className="text-lg font-semibold text-slate-950">
-                AI 辅助分析
-              </h3>
-              <span className={`status-badge ${statusClass}`}>
-                {status === "confirmed" && <span aria-hidden="true">✓</span>}
-                {statusLabel}
-              </span>
-            </div>
-            <p className="mt-2 text-sm text-slate-500">
-              AI 基于已核验的结构化事实生成分析草稿，最终内容需人工确认。
-            </p>
-            <p className="mt-1 text-xs text-slate-400">
-              {ANALYSIS_PERSISTED_NOTE}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {record && !dirty && (
-              <button
-                className="btn ghost"
-                disabled={working || busy || !captureCount}
-                onClick={() => void generateAnalysis()}
-              >
-                {draftBusy === "generate" ? "正在分析…" : "重新生成"}
-              </button>
-            )}
-            {!record && (
-              <button
-                className="btn primary"
-                disabled={working || busy || !captureCount}
-                onClick={() => void generateAnalysis()}
-              >
-                {draftBusy === "generate" ? "正在分析…" : "生成 AI 分析"}
-              </button>
-            )}
-            {record && dirty && (
-              <button
-                className="btn primary"
-                disabled={working || busy}
-                onClick={() => void writeAnalysis("save")}
-              >
-                {draftBusy === "save" ? "正在保存…" : "保存修改"}
-              </button>
-            )}
-            {record && !dirty && status === "unconfirmed" && (
-              <button
-                className="btn primary"
-                disabled={working || busy}
-                onClick={() => void writeAnalysis("confirm")}
-              >
-                {draftBusy === "confirm" ? "正在确认…" : "确认分析"}
-              </button>
+            <button
+              className="btn lt-compact-btn"
+              disabled={working || busy || !captureCount || (!!record && dirty)}
+              onClick={() => void generateAnalysis()}
+            >
+              {draftBusy === "generate"
+                ? "正在分析…"
+                : record
+                  ? "重新生成"
+                  : "生成 AI 分析"}
+            </button>
+            {record && (
+              <>
+                <button
+                  className="btn lt-compact-btn"
+                  disabled={working || busy || !dirty}
+                  onClick={() => void writeAnalysis("save")}
+                >
+                  {draftBusy === "save" ? "正在保存…" : "保存修改"}
+                </button>
+                <button
+                  className="btn primary lt-compact-btn"
+                  disabled={
+                    working || busy || dirty || status !== "unconfirmed"
+                  }
+                  onClick={() => void writeAnalysis("confirm")}
+                >
+                  {draftBusy === "confirm" ? "正在确认…" : "确认分析"}
+                </button>
+              </>
             )}
           </div>
         </div>
+        {record && (
+          <div className="lt-summary-line">
+            <span className={`lt-detail-badge ${statusClass}`}>
+              {statusLabel}
+            </span>
+            <small>{ANALYSIS_PERSISTED_NOTE}</small>
+          </div>
+        )}
         {sections ? (
-          <div className="ai-editor-surface mt-6 divide-y divide-slate-100 px-5">
+          <div>
             {ANALYSIS_SECTION_KEYS.map((key, index) => (
-              <label key={key} className="block space-y-3 py-5">
-                <span className="flex items-baseline gap-3">
-                  <span className="text-xs font-semibold text-blue-600">
-                    {String(index + 1).padStart(2, "0")}
-                  </span>
-                  <span className="text-sm font-semibold text-slate-800">
-                    {ANALYSIS_SECTION_TITLES[key]}
-                  </span>
+              <label key={key} className="lt-analysis-field">
+                <span>
+                  <b>{String(index + 1).padStart(2, "0")}</b>
+                  {ANALYSIS_SECTION_TITLES[key]}
                 </span>
                 <textarea
-                  className="w-full resize-y border-slate-200/60 bg-white/90 text-sm focus:border-blue-500 focus:outline-blue-500/30"
-                  rows={key === "keyRecords" ? 10 : 5}
+                  className={key === "keyRecords" ? "key-records" : ""}
+                  rows={key === "keyRecords" ? 8 : 3}
                   value={sections[key]}
                   disabled={working}
                   onChange={(event) => {
@@ -366,15 +336,15 @@ export function ProjectReportDialog({
             ))}
           </div>
         ) : (
-          <div className="ai-editor-surface mt-6 border-dashed px-6 py-10 text-center">
-            <p className="text-sm text-slate-500">
+          <div className="lt-report-empty">
+            <p>
               {draftBusy === "load"
                 ? "正在读取已保存的分析草稿…"
                 : "尚未生成分析草稿。生成后可在此编辑、保存并确认。"}
             </p>
           </div>
         )}
-      </section>
+      </div>
     </Dialog>
   );
 }
