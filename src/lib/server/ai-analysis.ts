@@ -4,7 +4,7 @@
  *
  * 本文件是纯函数层：不发网络请求、不读 PDF、不连 DB、不写磁盘。
  *
- * 边界（人工 LOCK，见 `MILESTONE_8_3.md`「边界澄清」）：
+ * 边界（人工 LOCK「边界澄清」）：
  *   1. 输入只有 `parseProjectReport` 产出的**结构化事实**（`ParseResult.rows`）。
  *      本文件没有任何 PDF 读取能力，**不可能**把原始 PDF 文本交给 LLM。
  *   2. 输入**最小化**：不向模型提供项目名称，也不提供任何「项目名称 vs 检索对象」
@@ -209,9 +209,8 @@ export type AnalysisPrompt = {
 /**
  * 系统提示词：固定文案，不随数据变化。
  *
- * 每条约束都对应一条硬规则；改动这里等于改动产品口径，需同步
- * `MILESTONE_8_3.md` 的边界说明、`src/lib/analysis-names.ts` 的标题口径与
- * `tests/zxgk-analysis.test.ts`。
+ * 每条约束都对应一条硬规则；改动这里等于改动产品口径，需同步本文件的「边界澄清」
+ * 说明、`src/lib/analysis-names.ts` 的标题口径与 `tests/zxgk-analysis.test.ts`。
  */
 export const ANALYSIS_SYSTEM_PROMPT = `你正在生成一份尽调核查的「AI 分析草稿」——它不是正式法律意见，也不是核查结论。你会收到两部分输入：一份已经由确定性规则解析器从公开网站留痕中解析完成的结构化事实清单，以及一组由系统**预先计算好**的统计数字。你的任务是**只基于这两部分**写出四段分析草稿，其中所有数量一律照抄系统统计。
 

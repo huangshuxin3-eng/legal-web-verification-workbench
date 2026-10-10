@@ -25,8 +25,8 @@
  *   5. PDF 下载与解析**有界并发**（`REPORT_CAPTURE_CONCURRENCY`）：只并发 3 份，
  *      不是把几十份一次性打满；顺序、错误语义与产物都与串行实现一致。
  *
- * 关于 canonical Query：规则是仓库既有 invariant（见 `NONLIT_WORKBENCH_CONTEXT.md`
- * 「canonical Query 选择规则」），扩展侧实现在 `extension/src/lib/query-identity.mjs`。
+ * 关于 canonical Query：规则是仓库既有 invariant（「canonical Query 选择规则」），
+ * 扩展侧实现在 `extension/src/lib/query-identity.mjs`。
  * `extension/` 是独立包且本仓库 tsconfig `allowJs: false`（直接 import 会报 TS7016），
  * 故此处按**同一规则、同一 tie-break** 落地；行为一致性由
  * `tests/zxgk-report-flow.test.ts` 固化（含与扩展同源的用例）。不新造任何选择规则。
